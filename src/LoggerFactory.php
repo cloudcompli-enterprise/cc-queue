@@ -5,7 +5,6 @@ namespace CloudCompli\CCQueue;
 use Monolog\Handler\RotatingFileHandler;
 use Monolog\Handler\StreamHandler;
 use Monolog\Logger;
-Use Monolog\Level;
 
 class LoggerFactory
 {
@@ -21,7 +20,7 @@ class LoggerFactory
     {
         $logger = new Logger('production');
         $filename = __DIR__ . '/logs/production.log';
-        $handler = new RotatingFileHandler($filename, 7, Level::Info);
+        $handler = new RotatingFileHandler($filename, 7, Logger::INFO);
         $logger->pushHandler($handler);
         return $logger;
     }

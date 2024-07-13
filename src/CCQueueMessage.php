@@ -13,12 +13,12 @@ class CCQueueMessage
 
     public function toArray()
     {
-        return ['body' => $this->body];
+        return $this->body;
     }
 
     public function toJson()
     {
-        return json_encode(['body' => $this->body]);
+        return json_encode($this->body);
     }
 
 }

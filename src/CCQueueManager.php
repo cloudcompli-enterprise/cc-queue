@@ -28,9 +28,7 @@ class CCQueueManager
     public function push(CCQueueMessage $message)
     {
         $this->redis->lpush($this->queueName, $message->toJson());
-        $this->logger->info('Message pushed to queue', [
-            'message' => $message->toArray(),
-        ]);
+        $this->logger->info('Message pushed to queue', $message->toArray());
     }
 
     public function pop()
@@ -39,7 +37,7 @@ class CCQueueManager
 
         if ($message) {
             $message = json_decode($message, true);
-            $this->logger->info('Message popped from the queue', ['message' => $message]);
+            $this->logger->info('Message popped from the queue', $message);
             return $message;
         } else {
             $this->logger->info('No message in the queue to pop');
