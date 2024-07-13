@@ -23,4 +23,3 @@ supervisord.log
 supervisord.pid
 package-lock.json
 .DS_Store
-composer.lock
