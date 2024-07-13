@@ -1,7 +1,7 @@
 {
   "name": "cloudcompli/cc-queue",
   "description": "Cloudcompli PHP Redis-based queue system",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "license": "Proprietary",
   "keywords": [],
   "authors": [
@@ -18,5 +18,5 @@
     "monolog/monolog": "^3.7.0",
     "ext-json": "*"
   },
-  "minimum-stability": "dev"
+  "minimum-stability": "dev-main"
 }
