@@ -17,5 +17,6 @@
     "psr/log": "^3.0",
     "monolog/monolog": "^3.7.0",
     "ext-json": "*"
-  }
+  },
+  "minimum-stability": "dev"
 }
