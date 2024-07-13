@@ -1,17 +1,21 @@
 {
   "name": "cloudcompli/cc-queue",
   "description": "Cloudcompli PHP Redis-based queue system",
-  "version": "0.1.0",
+  "version": "1.0.0",
+  "license": "Proprietary",
+  "keywords": [],
+  "authors": [
+    { "name": "Sean Bahrami", "email": "sean@cloudcompli.com" }
+  ],
+  "autoload": {
+    "psr-4": {
+      "CloudCompli\\CCQueue\\": "src/"
+    }
+  },
   "require": {
     "predis/predis": "^2.2",
     "psr/log": "^3.0",
     "monolog/monolog": "^3.7.0",
     "ext-json": "*"
-  },
-  "minimum-stability": "dev",
-  "autoload": {
-    "psr-4": {
-      "CloudCompli\\CCQueue\\": "src/"
-    }
   }
 }
