@@ -16,12 +16,12 @@ $config = require __DIR__ . '/config.php';
 $queueManager = new CCQueueManager($config['redis'], $config['queue'], $logger);
 $consumer = $queueManager->getConsumer();
 
+$logger->info('Initialized Queue');
 while (true) {
     $message = $consumer->consume();
     if ($message) {
         $logger->info('Consumed message', $message);
     } else {
-        $logger->info('No message to consume, sleeping...');
         sleep(1); // Sleep for a while if no message
     }
 }

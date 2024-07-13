@@ -18,10 +18,17 @@ class LoggerFactory
 
     public static function createProductionLogger()
     {
+        $logDir ='/var/logs/cc-queue';
+
+        // Ensure the logs directory exists
+        if (!is_dir($logDir)) {
+            mkdir($logDir, 0755, true);
+        }
+
         $logger = new Logger('production');
-        $filename = __DIR__ . '/logs/production.log';
-        $handler = new RotatingFileHandler($filename, 7, Logger::INFO);
+        $handler = new RotatingFileHandler($logDir . '/production.log', 7, Logger::INFO);
         $logger->pushHandler($handler);
+
         return $logger;
     }
 }
