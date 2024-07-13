@@ -1,6 +1,7 @@
 {
   "name": "cloudcompli/cc-queue",
   "description": "Cloudcompli PHP Redis-based queue system",
+  "version": "0.1.0",
   "require": {
     "predis/predis": "^2.2",
     "psr/log": "^3.0",
