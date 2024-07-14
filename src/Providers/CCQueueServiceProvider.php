@@ -43,7 +43,7 @@ class CCQueueServiceProvider extends ServiceProvider
         // Publish the configuration file
         $this->publishes([
             __DIR__.'/../config/cc-queue.php' => $configPath . DIRECTORY_SEPARATOR . '/cc-queue.php'
-        ]);
+        ], 'config');
 
         // Publish the migration
         if (!class_exists('CreateFailedCCQueueJobsTable')) {
