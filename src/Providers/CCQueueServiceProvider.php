@@ -30,25 +30,29 @@ class CCQueueServiceProvider extends ServiceProvider
      */
     public function boot()
     {
-        $configPath = $this->app->basePath('config');
-
+        if (!function_exists('config_path')) {
+            function config_path($path = '')
+            {
+                return base_path('config') . ($path ? DIRECTORY_SEPARATOR . $path : $path);
+            }
+        }
         // Define database_path if it doesn't exist
         if (!function_exists('database_path')) {
             function database_path($path = '')
             {
-                return $this->app->basePath('database') . ($path ? DIRECTORY_SEPARATOR . $path : $path);
+                return base_path('database') . ($path ? DIRECTORY_SEPARATOR . $path : $path);
             }
         }
 
         // Publish the configuration file
         $this->publishes([
-            __DIR__.'/../config/cc-queue.php' => $configPath . DIRECTORY_SEPARATOR . '/cc-queue.php'
+            __DIR__.'/../config/cc-queue.php' => config_path( 'cc-queue.php')
         ], 'config');
 
         // Publish the migration
         if (!class_exists('CreateFailedCCQueueJobsTable')) {
             $this->publishes([
-                __DIR__.'/../database/migrations/2024_01_01_000000_create_failed_cc_queue_jobs_table.php' => database_path('migrations/' . date('Y_m_d_His', time()) . '_create_failed_ccqueue_jobs_table.php'),
+                __DIR__.'/../database/migrations/2024_01_01_000000_create_failed_cc_queue_jobs_table.php' => database_path('migrations/' . date('Y_m_d_His', time()) . '_create_failed_cc-queue_jobs_table.php'),
             ], 'migrations');
         }
 
