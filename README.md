@@ -27,9 +27,14 @@ To install this package run one of the following commands, which ever is appropr
     php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider"
 ```
 
-### Publish the migration only
+### Publish only the config file
 ```
- php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=ccqueue-migrations
+    php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=config
+```
+
+### Publish only the migration file
+```
+ php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=migrations
 ```
 
 If add the migration database, run the following command:
