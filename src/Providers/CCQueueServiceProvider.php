@@ -3,6 +3,8 @@
 namespace CCQueue\Providers;
 
 use CCQueue\Services\JobDispatcher;
+use Illuminate\Contracts\Container\Container as Application;
+use Illuminate\Foundation\Application as LaravelApplication;
 use Illuminate\Support\ServiceProvider;
 
 class CCQueueServiceProvider extends ServiceProvider
@@ -44,17 +46,8 @@ class CCQueueServiceProvider extends ServiceProvider
             }
         }
 
-        // Publish the configuration file
-        $this->publishes([
-            __DIR__.'/../config/cc-queue.php' => config_path( 'cc-queue.php')
-        ], 'config');
-
-        // Publish the migration
-        if (!class_exists('CreateFailedCCQueueJobsTable')) {
-            $this->publishes([
-                __DIR__.'/../database/migrations/2024_01_01_000000_create_failed_cc_queue_jobs_table.php' => database_path('migrations/' . date('Y_m_d_His', time()) . '_create_failed_cc-queue_jobs_table.php'),
-            ], 'migrations');
-        }
+        $this->setupConfig($this->app);
+        $this->setupMigrations($this->app);
 
         // Register the commands
         if ($this->app->runningInConsole()) {
@@ -63,4 +56,37 @@ class CCQueueServiceProvider extends ServiceProvider
             ]);
         }
     }
+
+    /**
+     * Setup the configuration.
+     */
+    protected function setupConfig($app)
+    {
+        $source = realpath(__DIR__.'/../config/cc-queue.php');
+
+        if ($app->runningInConsole()) {
+            $this->publishes([$source => config_path('cc-queue.php')]);
+        }
+
+        $this->mergeConfigFrom($source, 'cc-queue');
+    }
+
+    /**
+     * Setup the migrations.
+     */
+    protected function setupMigrations($app)
+    {
+        $originalFileName = '2024_07_12_000000_create_failed_cc_queue_jobs_table.php';
+        $source = realpath(__DIR__.'/../database/migrations/'.$originalFileName);
+
+        if ($app->runningInConsole()) {
+            $migrationFile = database_path('migrations' . '/' . $originalFileName);
+            if (!file_exists($migrationFile)) {
+                $this->publishes([
+                    $source => database_path('migrations' . '/' . $originalFileName)
+                ], 'migrations');
+            }
+        }
+    }
+
 }
