@@ -21,6 +21,7 @@ class CreateFailedCCQueueJobsTable extends Migration
             $table->string('uuid')->unique();
             $table->text('connection');
             $table->text('queue');
+            // NOTE: Using jsonb column for legacy (postgres support), newer versions of Laravel support this natively (->json('payload'))
             $table->jsonb('payload');
             $table->longText('exception');
             $table->timestamp('failed_at')->default(DB::raw('CURRENT_TIMESTAMP'));
