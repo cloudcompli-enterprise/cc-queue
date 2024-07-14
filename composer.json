@@ -25,7 +25,7 @@
     "extra" : {
         "laravel": {
             "providers": [
-                "CCQueue\\CCQueueServiceProvider"
+                "CCQueue\\Providers\\CCQueueServiceProvider"
             ]
         }
     },
