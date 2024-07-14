@@ -21,9 +21,12 @@ class CreateFailedCCQueueJobsTable extends Migration
             $table->string('uuid')->unique();
             $table->text('connection');
             $table->text('queue');
-            $table->longText('payload');
+            $table->jsonb('payload');
             $table->longText('exception');
             $table->timestamp('failed_at')->default(DB::raw('CURRENT_TIMESTAMP'));
+
+            $table->index('payload')->using('gin')->class('jsonb_path_ops');
+
         });
     }
 
