@@ -14,7 +14,9 @@ class CreateFailedCCQueueJobsTable extends Migration
      */
     public function up()
     {
-        Schema::create('failed_cc_queue_jobs', function (Blueprint $table) {
+        $connection = config('cc_queue.failed.database');
+
+        Schema::connection($connection)->create(config('cc_queue.failed.table'), function (Blueprint $table) {
             $table->increments('id');
             $table->string('uuid')->unique();
             $table->text('connection');
@@ -32,6 +34,8 @@ class CreateFailedCCQueueJobsTable extends Migration
      */
     public function down()
     {
-        Schema::dropIfExists('failed_cc_queue_jobs');
+        $connection = config('cc_queue.failed.database');
+
+        Schema::connection($connection)->dropIfExists(config('cc_queue.failed.table'));
     }
 }

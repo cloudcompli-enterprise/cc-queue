@@ -31,7 +31,7 @@ return [
         'redis' => [
             'driver' => 'redis',
             'connection' => 'default',
-            'queue' => env('CC_QUEUE_REDIS_QUEUE', 'default'),
+            'queue' => env('CC_QUEUE_REDIS_QUEUE', 'cc-queue'),
             'retry_after' => 90,
             'block_for' => null,
         ],
@@ -51,6 +51,6 @@ return [
 
     'failed' => [
         'database' => env('DB_CONNECTION', 'mysql'),
-        'table' => 'failed_cc_queue_jobs',
+        'table' => env('CC_QUEUE_FAILED_JOBS_TABLE', 'cc_queue_failed_jobs'),
     ],
 ];
