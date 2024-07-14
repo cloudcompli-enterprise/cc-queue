@@ -65,7 +65,9 @@ class CCQueueServiceProvider extends ServiceProvider
         $source = realpath(__DIR__.'/../config/cc-queue.php');
 
         if ($app->runningInConsole()) {
-            $this->publishes([$source => config_path('cc-queue.php')]);
+            $this->publishes([
+                $source => config_path('cc-queue.php')
+            ], 'config');
         }
 
         $this->mergeConfigFrom($source, 'cc-queue');
