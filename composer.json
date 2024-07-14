@@ -1,5 +1,5 @@
 {
-    "name": "cloudcompli/cc-queue",
+    "name": "cloudcompli-enterprise/cc-queue",
     "description": "CC Queue",
     "type": "library",
     "license": "Proprietary",
