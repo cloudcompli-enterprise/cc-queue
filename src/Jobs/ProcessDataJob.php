@@ -2,6 +2,7 @@
 
 namespace CCQueue\Jobs;
 
+use CCQueue\Services\UuidGenerator;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
@@ -22,13 +23,7 @@ class ProcessDataJob implements ShouldQueue
 
     public function __construct($data, $version)
     {
-        // Generate a UUID using Str::uuid() if available, otherwise use Ramsey\Uuid
-        if (method_exists(Str::class, 'uuid')) {
-            $this->uuid = (string) Str::uuid();
-        } else {
-            $this->uuid = Uuid::uuid4()->toString();
-        }
-
+        $this->uuid = UuidGenerator::generate();
         $this->data = $data;
         $this->version = $version;
     }
@@ -38,6 +33,7 @@ class ProcessDataJob implements ShouldQueue
         // Process the data here
         Log::info('Processing data: ', [
             'uuid' => $this->uuid,
+            'version' => $this->version,
             'data' => $this->data,
         ]);
     }
