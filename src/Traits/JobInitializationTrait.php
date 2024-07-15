@@ -10,9 +10,9 @@ trait JobInitializationTrait
     public $data;
     public $version;
 
-    public function initializeJobData($data, $version = 'default')
+    public function initializeJobData($data, $version = 'default', $uuid=null)
     {
-        $this->uuid = !empty($data['uuid']) ? $data['uuid'] : UuidGenerator::generate();
+        $this->uuid = $uuid ?: UuidGenerator::generate();
         $this->data = $data;
         $this->version = $version;
     }

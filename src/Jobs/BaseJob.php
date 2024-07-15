@@ -13,9 +13,9 @@ abstract class BaseJob implements ShouldQueue
 {
     use InteractsWithQueue, Queueable, SerializesModels, JobInitializationTrait;
 
-    public function __construct($data = [], $version = 'default')
+    public function __construct($data = [], $version = 'default', $uuid = null)
     {
-        $this->initializeJobData($data, $version);
+        $this->initializeJobData($data, $version, $uuid);
     }
 
     public function toArray()
@@ -32,9 +32,10 @@ abstract class BaseJob implements ShouldQueue
     {
         $instance = new static(
             !empty($payload['data']) ? $payload['data'] : [],
-            !empty($payload['version']) ? $payload['version'] : 'default' // Provide default value for version
+            !empty($payload['version']) ? $payload['version'] : 'default', // Provide default value for version,
+            !empty($payload['uuid']) ? $payload['uuid'] : null
         );
-        $instance->uuid = !empty($payload) ? $payload['uuid'] : UuidGenerator::generate();
+
         return $instance;
     }
 
