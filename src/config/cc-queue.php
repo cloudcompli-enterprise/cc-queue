@@ -52,4 +52,22 @@ return [
     'failed' => [
         'database' => env('DB_CONNECTION', 'mysql'),
     ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Job Handlers
+    |--------------------------------------------------------------------------
+    |
+    | These mappings define the relationship between job types, actions, and
+    | their corresponding job classes. This allows you to dynamically
+    | instantiate job classes based on the job type and action.
+    |
+    */
+
+    'handlers' => [
+        'Event' => [
+            'action' => 'job class',
+        ],
+        // Add more job types as needed
+    ],
 ];
