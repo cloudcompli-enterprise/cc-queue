@@ -59,7 +59,8 @@ Set the event handlers in the config file so that the CC Queue knows what to do 
     CC_QUEUE_REDIS_HOST=redis # This is optional
     CC_QUEUE_CONNECTION=redis # Use this to specify the connection to use; Default is redis;
     CC_QUEUE_REDIS_QUEUE=cc-queue # This is optional; (Recommended if you want a unique redis queue name); Default is cc-queue
-    CC_FAILED_JOBS_TABLE=cc_queue_failed_jobs # This is optional; 
+    CC_FAILED_JOBS_TABLE=cc_queue_failed_jobs # This is optional;
+    CC_QUEUE_RETRY_LIMIT=3 # This is optional; Default is 3; The number or retry attempts before the job is marked as failed.
 ```
 
 

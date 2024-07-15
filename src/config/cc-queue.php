@@ -70,4 +70,6 @@ return [
         ],
         // Add more job types as needed
     ],
+
+    'retry_limit' => env('CC_QUEUE_RETRY_LIMIT', 3), // Add retry limit
 ];
