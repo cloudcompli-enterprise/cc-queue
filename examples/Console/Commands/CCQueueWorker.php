@@ -41,7 +41,16 @@ class CCQueueWorker extends Command
 
     protected function deserializeJob(array $payload)
     {
-        return ProcessDataJob::fromArray($payload);
+        $type = $payload['type'] ? $payload['type'] : null;
+        $action = $payload['action'] ? $payload['action'] : null;
+        $version = $payload['version'] ? $payload['version'] : 'default';
+
+        if (isset($this->jobHandlers[$type][$action])) {
+            $jobClass = $this->jobHandlers[$type][$action];
+            return new $jobClass($payload['data'], $version);
+        }
+
+        throw new \Exception("Unknown job type or action: {$type} / {$action}");
     }
 
     protected function logFailedJob($job, $exception)

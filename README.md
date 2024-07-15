@@ -42,14 +42,27 @@ If add the migration database, run the following command:
     php artisan migrate
 ```
 
+## Configuration (Required)
+Set the event handlers in the config file so that the CC Queue knows what to do with the payload.
+```
+  'handlers' => [
+        'Event' => [
+            'action' => 'job class',
+        ],
+        // Add more job types as needed
+    ],
+  ]
+```
 
-## Configuration (Optional)
+## Configuration (Optional Environmental Variables)
 ```
     CC_QUEUE_REDIS_HOST=redis # This is optional
     CC_QUEUE_CONNECTION=redis # Use this to specify the connection to use; Default is redis;
     CC_QUEUE_REDIS_QUEUE=cc-queue # This is optional; (Recommended if you want a unique redis queue name); Default is cc-queue
     CC_FAILED_JOBS_TABLE=cc_queue_failed_jobs # This is optional; 
 ```
+
+
 ---
 # Deployment
 Package should be included in a laravel package and deployed with the laravel project. 
