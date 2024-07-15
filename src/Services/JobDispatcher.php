@@ -42,11 +42,8 @@ class JobDispatcher
     public function enqueueNodeJob(array $data)
     {
         $job = new ProcessDataJob($data, 'node');
-        $payload = json_encode([
-            'system' => 'node',
-            'data' => $job->toArray()
-        ]);
-        Redis::publish('cc-queue:node:tasks', $payload);
+        $payload = json_encode($job->toArray());
+        Redis::lpush('cc-queue:node:tasks', $payload);
     }
 
     /**
@@ -58,10 +55,7 @@ class JobDispatcher
     public function enqueueLegacyJob(array $data)
     {
         $job = new ProcessDataJob($data, 'legacy');
-        $payload = json_encode([
-            'system' => 'legacy',
-            'data' => $job->toArray()
-        ]);
-        Redis::publish('cc-queue:legacy:tasks', $payload);
+        $payload = json_encode($job->toArray());
+        Redis::lpush('cc-queue:legacy:tasks', $payload);
     }
 }
