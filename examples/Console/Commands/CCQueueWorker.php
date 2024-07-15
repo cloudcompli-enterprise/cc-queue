@@ -1,13 +1,13 @@
 <?php
 
-namespace CCQueue\Console\Commands;
+namespace CCQueue\Examples\Console\Commands;
 
 use Carbon\Carbon;
 use CCQueue\Jobs\ProcessDataJob;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Bus;
-use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Redis;
 
 class CCQueueWorker extends Command
 {

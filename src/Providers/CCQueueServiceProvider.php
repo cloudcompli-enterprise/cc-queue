@@ -3,7 +3,6 @@
 namespace CCQueue\Providers;
 
 use CCQueue\Services\JobDispatcher;
-use Illuminate\Contracts\Container\Container as Application;
 use Illuminate\Foundation\Application as LaravelApplication;
 use Illuminate\Support\ServiceProvider;
 
@@ -51,9 +50,7 @@ class CCQueueServiceProvider extends ServiceProvider
 
         // Register the commands
         if ($this->app->runningInConsole()) {
-            $this->commands([
-                \CCQueue\Console\Commands\CCQueueWorker::class,
-            ]);
+            $this->commands([]);
         }
     }
 
