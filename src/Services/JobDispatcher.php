@@ -6,17 +6,9 @@ use Illuminate\Support\Facades\Redis;
 use CCQueue\Jobs\ProcessDataJob;
 class JobDispatcher
 {
-    /**
-     * Enqueue a job to the default queue.
-     *
-     * @param array $data
-     * @return void
-     */
-    public function enqueueJob(array $data)
+    public function enqueueJob(array $payload)
     {
-        $job = new ProcessDataJob($data, 'default');
-        $payload = json_encode($job->toArray());
-        Redis::lpush('cc-queue:default:tasks', $payload);
+        Redis::lpush('cc-queue:default:tasks', json_encode($payload));
     }
 
     /**
@@ -26,11 +18,9 @@ class JobDispatcher
      * @param string $version
      * @return void
      */
-    public function enqueueCustomJob(array $data, $version='default')
+    public function enqueueCustomJob(array $payload, $version='default')
     {
-        $job = new ProcessDataJob($data, $version);
-        $payload = json_encode($job->toArray());
-        Redis::lpush('cc-queue:' . $version . ':tasks', $payload);
+        Redis::lpush('cc-queue:' . $version . ':tasks', json_encode($payload));
     }
 
     /**
@@ -39,11 +29,9 @@ class JobDispatcher
      * @param array $data
      * @return void
      */
-    public function enqueueNodeJob(array $data)
+    public function enqueueNodeJob(array $payload)
     {
-        $job = new ProcessDataJob($data, 'node');
-        $payload = json_encode($job->toArray());
-        Redis::lpush('cc-queue:node:tasks', $payload);
+        Redis::lpush('cc-queue:node:tasks', json_encode($payload));
     }
 
     /**
@@ -52,10 +40,8 @@ class JobDispatcher
      * @param array $data
      * @return void
      */
-    public function enqueueLegacyJob(array $data)
+    public function enqueueLegacyJob(array $payload)
     {
-        $job = new ProcessDataJob($data, 'legacy');
-        $payload = json_encode($job->toArray());
-        Redis::lpush('cc-queue:legacy:tasks', $payload);
+        Redis::lpush('cc-queue:legacy:tasks', json_encode($payload));
     }
 }
