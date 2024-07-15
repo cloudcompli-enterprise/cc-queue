@@ -2,6 +2,7 @@
 
 namespace CCQueue\Jobs;
 
+use CCQueue\Services\UuidGenerator;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Queue\InteractsWithQueue;
@@ -33,7 +34,7 @@ abstract class BaseJob implements ShouldQueue
             !empty($payload['data']) ? $payload['data'] : [],
             !empty($payload['version']) ? $payload['version'] : 'default' // Provide default value for version
         );
-        $instance->uuid = $payload['uuid'];
+        $instance->uuid = !empty($payload) ? $payload['uuid'] : UuidGenerator::generate();
         return $instance;
     }
 
