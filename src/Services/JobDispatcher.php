@@ -6,13 +6,39 @@ use Illuminate\Support\Facades\Redis;
 use CCQueue\Jobs\ProcessDataJob;
 class JobDispatcher
 {
-    public function enqueueJob(array $data, $version='default')
+    /**
+     * Enqueue a job to the default queue.
+     *
+     * @param array $data
+     * @return void
+     */
+    public function enqueueJob(array $data)
+    {
+        $job = new ProcessDataJob($data, 'default');
+        $payload = json_encode($job->toArray());
+        Redis::lpush('cc-queue:default:tasks', $payload);
+    }
+
+    /**
+     * Enqueue a job to a custom queue.
+     *
+     * @param array $data
+     * @param string $version
+     * @return void
+     */
+    public function enqueueCustomJob(array $data, $version='default')
     {
         $job = new ProcessDataJob($data, $version);
         $payload = json_encode($job->toArray());
         Redis::lpush('cc-queue:' . $version . ':tasks', $payload);
     }
 
+    /**
+     * Enqueue a job to the node queue.
+     *
+     * @param array $data
+     * @return void
+     */
     public function enqueueNodeJob(array $data)
     {
         $job = new ProcessDataJob($data, 'node');
@@ -23,6 +49,12 @@ class JobDispatcher
         Redis::publish('cc-queue:node:tasks', $payload);
     }
 
+    /**
+     * Enqueue a job to the legacy queue.
+     *
+     * @param array $data
+     * @return void
+     */
     public function enqueueLegacyJob(array $data)
     {
         $job = new ProcessDataJob($data, 'legacy');
