@@ -21,6 +21,7 @@ abstract class BaseJob implements ShouldQueue
     {
         return [
             'type' => static::class,
+            'uuid' => $this->uuid,
             'version' => $this->version,
             'data' => $this->data,
         ];
