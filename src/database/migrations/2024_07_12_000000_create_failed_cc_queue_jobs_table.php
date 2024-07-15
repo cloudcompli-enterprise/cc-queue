@@ -5,7 +5,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
-class CreateFailedCCQueueJobsTable extends Migration
+class CreateFailedCcQueueJobsTable extends Migration
 {
     /**
      * Run the migrations.
