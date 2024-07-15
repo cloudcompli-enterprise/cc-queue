@@ -15,7 +15,6 @@ class ProcessDataJob implements ShouldQueue
 
     public $uuid;
     protected $data;
-
     // The version of the queue this job belongs to
     protected $version;
 

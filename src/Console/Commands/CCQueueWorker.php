@@ -52,12 +52,13 @@ class CCQueueWorker extends Command
             'connection' => config('cc_queue.default'),
             'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
             'payload' => json_encode($jobData),
-            'exception' => (string) $exception,
+            'exception' => json_encode([
+                'message' => $exception->getMessage(),
+                'trace' => $exception->getTrace()
+            ]), // Store exception as JSON string
             'failed_at' => Carbon::now(),
         ];
 
-        DB::connection(config('cc_queue.failed.database'))
-            ->table(config('cc_queue.failed.table'))
-            ->insert($failedJob);
+        DB::table('cc_queue_failed_jobs')->insert($failedJob);
     }
 }
