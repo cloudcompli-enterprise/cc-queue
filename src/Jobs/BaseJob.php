@@ -17,6 +17,15 @@ abstract class BaseJob implements ShouldQueue
         $this->initializeJobData($data, $version);
     }
 
+    public function toArray()
+    {
+        return [
+            'type' => static::class,
+            'version' => $this->version,
+            'data' => $this->data,
+        ];
+    }
+
     public static function fromArray(array $payload)
     {
         $instance = new static($payload['data'], $payload['version']);
