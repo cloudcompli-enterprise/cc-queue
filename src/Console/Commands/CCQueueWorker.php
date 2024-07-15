@@ -46,11 +46,12 @@ class CCQueueWorker extends Command
 
     protected function logFailedJob($job, $exception)
     {
+        $jobData = json_decode($job, true);
         $failedJob = [
             'uuid' => json_decode($job, true)['uuid'],
             'connection' => config('cc_queue.default'),
-            'queue' => 'cc-queue',
-            'payload' => $job,
+            'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
+            'payload' => json_encode($jobData),
             'exception' => (string) $exception,
             'failed_at' => Carbon::now(),
         ];
