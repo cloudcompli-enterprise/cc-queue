@@ -44,7 +44,7 @@ class CCQueueWorkerCommand extends Command
                 }
 
                 $jobUuid = $payload['uuid'];
-                $jobStatusKey  = 'cc-queue:job:' . $jobUuid;
+                $jobStatusKey  = 'cc-queue:jobs:' . $jobUuid;
 
                 // Retrieve the job record.
                 $jobRecord = $redis->hgetall($jobStatusKey);

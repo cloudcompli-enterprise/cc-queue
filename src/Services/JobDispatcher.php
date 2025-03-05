@@ -31,13 +31,13 @@ class JobDispatcher
             $payload['uuid'] = (string)UuidGenerator::generate();
         }
 
-        $priority = $payload['priority'] ? strtolower($payload['priority']) : 'normal';
+        $priority = !empty($payload['priority']) ? strtolower($payload['priority']) : 'normal';
 
         $job = [
-            'type' => $payload['type'] ?? '',
+            'type' => $payload['type'] ? $payload['type'] : '',
             'uuid' => $payload['uuid'],
             'version' => $version,
-            'data' => json_encode($payload['data'] ?? []),
+            'data' => json_encode(!empty($payload) ? $payload['data'] : []),
             'status' => self::STATUS_PENDING, // pending, in_progress, completed, failed
             'attempts' => 0,
             'priority' => $priority,
@@ -45,13 +45,15 @@ class JobDispatcher
             'updated_at' => date('c'),
         ];
 
+        dump('cc-queue:jobs:' . $payload['uuid'], $job);
+
         Redis::hmset('cc-queue:jobs:' . $payload['uuid'], $job);
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
     }
 
     private function getQueueKey($version, $priority = 'normal')
     {
-        $version = $version ?: $this->defaultVersion;
+        $version = $version ? $version : $this->defaultVersion;
 
         switch ($priority) {
             case 'high':
@@ -110,7 +112,7 @@ class JobDispatcher
         // Set the default expire status to 24 hours.
         $expireLength= is_null($expire) ? $expire : config('cc-queue.expire_status', 86400);
 
-        $key = 'cc-queue:job:' . $uuid;
+        $key = 'cc-queue:jobs:' . $uuid;
         $fields = [
             'status' => $status,
             'updated_at' => date('c')
