@@ -44,6 +44,7 @@ To install this package run one of the following commands, which ever is appropr
 ```
  php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=commands
 ```
+NOTE: Command file is required to run the queue worker. (Note the Queue worker can be modified to specific needs)
 
 If add the migration database, run the following command:
 ```
