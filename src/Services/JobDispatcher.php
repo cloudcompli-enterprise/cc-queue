@@ -49,6 +49,8 @@ class JobDispatcher
 
         Redis::hmset('cc-queue:jobs:' . $payload['uuid'], $job);
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
+
+        return $payload['uuid'];
     }
 
     private function getQueueKey($version, $priority = 'normal')
@@ -74,7 +76,7 @@ class JobDispatcher
      */
     public function enqueueCustomJob(array $payload, $version = 'default')
     {
-        $this->enqueueJob($payload, $version);
+        return $this->enqueueJob($payload, $version);
     }
 
     /**
@@ -85,7 +87,7 @@ class JobDispatcher
      */
     public function enqueueNodeJob(array $payload)
     {
-        $this->enqueueJob($payload, 'node');
+        return $this->enqueueJob($payload, 'node');
     }
 
     /**
@@ -96,7 +98,13 @@ class JobDispatcher
      */
     public function enqueueLegacyJob(array $payload)
     {
-        $this->enqueueJob($payload, 'legacy');
+        return $this->enqueueJob($payload, 'legacy');
+    }
+
+    public function getJobStatus($uuid)
+    {
+        $key = 'cc-queue:jobs:' . $uuid;
+        return Redis::hgetall($key);
     }
 
     /**
