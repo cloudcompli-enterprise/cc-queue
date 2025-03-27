@@ -57,10 +57,6 @@ class JobDispatcher
         }
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
 
-        // Help prevent memory leaks by expiring the job after a certain amount of time.
-        if ($expireLength > 0) {
-            Redis::expire($key, $expireLength);
-        }
         return $payload['uuid'];
     }
 
