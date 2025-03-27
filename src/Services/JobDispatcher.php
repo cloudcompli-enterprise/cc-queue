@@ -21,11 +21,15 @@ class JobDispatcher
      *
      * @param array $payload
      * @param string|null $version
+     * @param int|null $expire The number of seconds until the job expires.
      * @return void
      */
-    public function enqueueJob(array $payload, $version = null)
+    public function enqueueJob(array $payload, $version = null, $expire = null)
     {
         $version = $version ?: $this->defaultVersion;
+
+        // Set the default expire status to 24 hours. (To prevent memory leaks)
+        $expireLength= is_null($expire) ? $expire : config('cc-queue.expire_jobs', 86400);
 
         if (empty($payload['uuid'])) {
             $payload['uuid'] = (string)UuidGenerator::generate();
@@ -45,9 +49,18 @@ class JobDispatcher
             'updated_at' => date('c'),
         ];
 
-        Redis::hmset('cc-queue:jobs:' . $payload['uuid'], $job);
+        $jobKey = 'cc-queue:jobs:' . $payload['uuid'];
+        Redis::hmset($jobKey, $job);
+        // Help prevent memory leaks by expiring the job after a certain amount of time.
+        if ($expireLength > 0) {
+            Redis::expire($key, $expireLength);
+        }
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
 
+        // Help prevent memory leaks by expiring the job after a certain amount of time.
+        if ($expireLength > 0) {
+            Redis::expire($key, $expireLength);
+        }
         return $payload['uuid'];
     }
 
