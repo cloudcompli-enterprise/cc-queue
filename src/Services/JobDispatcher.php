@@ -45,8 +45,6 @@ class JobDispatcher
             'updated_at' => date('c'),
         ];
 
-        dump('cc-queue:jobs:' . $payload['uuid'], $job);
-
         Redis::hmset('cc-queue:jobs:' . $payload['uuid'], $job);
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
 
