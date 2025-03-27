@@ -88,4 +88,13 @@ class CCQueueServiceProvider extends ServiceProvider
         }
     }
 
+    protected function setupCommands($app)
+    {
+        if ($app->runningInConsole()) {
+            $this->publishes([
+                __DIR__.'../Console/Commands/CCQueueWorkerCommand.php' => app_path('Console/Commands/CCQueueWorkerCommand.php'),
+            ], 'commands');
+        }
+    }
+
 }

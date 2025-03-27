@@ -7,6 +7,9 @@ In this library the payload is a simple JSON object that can be used to pass to 
 
 The redis queue will have the following keys:
 - cc-queue:version - the version of the queue (Example: Legacy, Default, Node, etc)
+
+Each queue version has a high/default/low priority queue.The json payload priority flag will determine which queue the payload will be placed in.
+
 ```
     cc-queue:version
     cc-queue:version:tasks - is the list of the tasks for that version
@@ -36,6 +39,12 @@ To install this package run one of the following commands, which ever is appropr
 ```
  php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=migrations
 ```
+
+### Publish only the command file
+```
+ php artisan vendor:publish --provider="CCQueue\Providers\CCQueueServiceProvider" --tag=commands
+```
+NOTE: Command file is required to run the queue worker. (Note the Queue worker can be modified to specific needs)
 
 If add the migration database, run the following command:
 ```
