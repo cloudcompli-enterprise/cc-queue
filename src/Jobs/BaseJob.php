@@ -28,11 +28,11 @@ abstract class BaseJob implements ShouldQueue
         ];
     }
 
-    public static function fromArray(array $payload)
+    public static function fromArray(array $payload, $version = null)
     {
         $instance = new static(
             !empty($payload['data']) ? $payload['data'] : [],
-            !empty($payload['version']) ? $payload['version'] : 'default', // Provide default value for version,
+            !empty($payload['version']) ? $payload['version'] : $version, // Provide default value for version,
             !empty($payload['uuid']) ? $payload['uuid'] : null
         );
 
