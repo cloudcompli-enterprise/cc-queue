@@ -94,6 +94,7 @@ class CCQueueServiceProvider extends ServiceProvider
     protected function setupCommands($app)
     {
         if ($app->runningInConsole()) {
+            // Comment out the publish command to avoid conflicts with the app's own commands
             // $this->publishes([
             //     __DIR__.'/../Console/Commands/CCQueueWorkerCommand.php' => app_path('Console/Commands/CCQueueWorkerCommand.php'),
             // ], 'commands');
