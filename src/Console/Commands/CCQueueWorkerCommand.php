@@ -37,16 +37,6 @@ class CCQueueWorkerCommand extends Command
 
         $version = $this->argument('version');
 
-
-        $this->info(json_encode([
-            'env' => getenv('APP_ENV'),
-            'log' => getenv('APP_LOG'),
-            'log_level' => getenv('APP_LOG_LEVEL'),
-            // 'user' => get_current_user(),
-            'cwd' => getcwd(),
-            'php' => phpversion(),
-        ], JSON_PRETTY_PRINT));
-
         /**
          * If the version is default, we use Bus::dispatchNow() - Laravel 6+
          * If the version is legacy, we use direct handle() - Laravel 5.2
