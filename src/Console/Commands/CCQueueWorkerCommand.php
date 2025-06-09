@@ -33,7 +33,7 @@ class CCQueueWorkerCommand extends Command
 
     public function handle()
     {
-        Log::info('CCQueueWorkerCommand started(LEGACY)');
+        Log::info('CCQueueWorkerCommand started');
 
         $version = $this->argument('version');
 
