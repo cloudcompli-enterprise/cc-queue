@@ -61,7 +61,6 @@ class CCQueueWorkerCommand extends Command
         $highLimit = 5; // Number of high-priority jobs before checking normal/low
 
         while (true) {
-
             $queueItem = null;
 
             // Weighted Fair Scheduling: Up to 5 high, then 1 normal, then 1 low, then repeat.
@@ -95,8 +94,6 @@ class CCQueueWorkerCommand extends Command
                 continue;
             }
             
-            $queueItem = $redis->brpop([$queueHigh, $queueNormal, $queueLow], 5);
-
             try {
                 $job = $queueItem[1]; // This is related to brpop array index.
                 if (!$job) {
