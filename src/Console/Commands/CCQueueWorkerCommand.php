@@ -62,7 +62,7 @@ class CCQueueWorkerCommand extends Command
 
         while (true) {
 
-            queueItem = null;
+            $queueItem = null;
 
             // Weighted Fair Scheduling: Up to 5 high, then 1 normal, then 1 low, then repeat.
             if ($highCount < $highLimit) {
