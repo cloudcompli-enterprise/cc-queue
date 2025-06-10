@@ -57,7 +57,44 @@ class CCQueueWorkerCommand extends Command
         // Make sure logs are flushed before starting the worker
         $this->flushLogs();
 
+        $highCount = 0;
+        $highLimit = 5; // Number of high-priority jobs before checking normal/low
+
         while (true) {
+
+            queueItem = null;
+
+            // Weighted Fair Scheduling: Up to 5 high, then 1 normal, then 1 low, then repeat.
+            if ($highCount < $highLimit) {
+                // Try high-priority queue first
+                $queueItem = $redis->brpop([$queueHigh], 1);
+                if ($queueItem) {
+                    $highCount++;
+                }
+            }
+
+            // If no high-priority job this round, try normal
+            if (!$queueItem) {
+                $queueItem = $redis->brpop([$queueNormal], 1);
+                if ($queueItem) {
+                    $highCount = 0; // Reset high-priority counter
+                }
+            }
+
+            // If still nothing, try low
+            if (!$queueItem) {
+                $queueItem = $redis->brpop([$queueLow], 1);
+                if ($queueItem) {
+                    $highCount = 0; // Reset high-priority counter
+                }
+            }
+
+            // If nothing was found in any queue, sleep briefly and retry
+            if (!$queueItem) {
+                usleep(500000); // 0.5 second sleep if no job
+                continue;
+            }
+            
             $queueItem = $redis->brpop([$queueHigh, $queueNormal, $queueLow], 5);
 
             try {
