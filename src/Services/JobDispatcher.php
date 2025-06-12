@@ -53,7 +53,7 @@ class JobDispatcher
         Redis::hmset($jobKey, $job);
         // Help prevent memory leaks by expiring the job after a certain amount of time.
         if ($expireLength > 0) {
-            Redis::expire($key, $expireLength);
+            Redis::expire($jobKey, $expireLength);
         }
         Redis::lpush($this->getQueueKey($version, $priority), json_encode($payload));
 

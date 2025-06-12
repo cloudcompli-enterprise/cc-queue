@@ -47,10 +47,13 @@ class CCQueueServiceProvider extends ServiceProvider
 
         $this->setupConfig($this->app);
         $this->setupMigrations($this->app);
+        $this->setupCommands($this->app);
 
         // Register the commands
         if ($this->app->runningInConsole()) {
-            $this->commands([]);
+            $this->commands([
+                \CCQueue\Console\Commands\CCQueueWorkerCommand::class,
+            ]);
         }
     }
 
@@ -91,9 +94,10 @@ class CCQueueServiceProvider extends ServiceProvider
     protected function setupCommands($app)
     {
         if ($app->runningInConsole()) {
-            $this->publishes([
-                __DIR__.'../Console/Commands/CCQueueWorkerCommand.php' => app_path('Console/Commands/CCQueueWorkerCommand.php'),
-            ], 'commands');
+            // Comment out the publish command to avoid conflicts with the app's own commands
+            // $this->publishes([
+            //     __DIR__.'/../Console/Commands/CCQueueWorkerCommand.php' => app_path('Console/Commands/CCQueueWorkerCommand.php'),
+            // ], 'commands');
         }
     }
 
