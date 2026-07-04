@@ -60,7 +60,7 @@ class JobDispatcher
         return $payload['uuid'];
     }
 
-    private function getQueueKey($version, $priority = 'normal')
+    public function getQueueKey($version, $priority = 'normal')
     {
         $version = $version ? $version : $this->defaultVersion;
 

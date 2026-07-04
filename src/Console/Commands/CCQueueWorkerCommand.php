@@ -42,7 +42,6 @@ class CCQueueWorkerCommand extends Command
          * If the version is legacy, we use direct handle() - Laravel 5.2
          */
         $this->useBusDispatch = strtolower($this->argument('version')) !== 'legacy';
-        $redis = Redis::connection();
 
         // Define Redis keys for different priority queues.
         $queueHigh = 'cc-queue:' . $version . ':tasks:high';
@@ -51,51 +50,75 @@ class CCQueueWorkerCommand extends Command
 
         $dispatcher = new JobDispatcher();
         $retryLimit = config('cc-queue.retry_limit', 3);
+        $workerId = $this->buildWorkerId();
+        $heartbeatTtl = 300;
+        $heartbeatKey = $this->getHeartbeatKey($version, $workerId);
+        $processingQueues = [
+            'high' => $this->getProcessingQueueKey($version, 'high', $workerId),
+            'normal' => $this->getProcessingQueueKey($version, 'normal', $workerId),
+            'low' => $this->getProcessingQueueKey($version, 'low', $workerId),
+        ];
+        $queueMap = [
+            'high' => $queueHigh,
+            'normal' => $queueNormal,
+            'low' => $queueLow,
+        ];
+
+        $this->startHeartbeatRefresher($heartbeatKey, $heartbeatTtl);
+        $redis = Redis::connection();
 
         $this->info("Worker started on queues: [$queueHigh, $queueNormal, $queueLow]");
 
         // Make sure logs are flushed before starting the worker
         $this->flushLogs();
 
-        $highCount = 0;
-        $highLimit = 5; // Number of high-priority jobs before checking normal/low
+        $this->refreshHeartbeat($redis, $heartbeatKey, $heartbeatTtl);
+        $this->recoverOrphanedProcessingJobs($redis, $dispatcher, $version);
+
+        /*
+         * Jobs are atomically moved from the source queue into a per-worker
+         * processing list before execution. A forked refresher keeps the heartbeat
+         * alive during long handlers; startup and periodic recovery only requeue
+         * processing lists whose owner heartbeat has expired.
+         */
+        $prioritySchedule = ['high', 'high', 'high', 'high', 'high', 'normal', 'low'];
+        $priorityScheduleIndex = 0;
+        $recoveryInterval = 30;
+        $lastRecoveryAt = time();
 
         while (true) {
-            $queueItem = null;
+            $this->refreshHeartbeat($redis, $heartbeatKey, $heartbeatTtl);
 
-            // Weighted Fair Scheduling: Up to 5 high, then 1 normal, then 1 low, then repeat.
-            if ($highCount < $highLimit) {
-                // Try high-priority queue first
-                $queueItem = $redis->brpop([$queueHigh], 1);
-                if ($queueItem) {
-                    $highCount++;
-                }
+            if (time() - $lastRecoveryAt >= $recoveryInterval) {
+                $this->recoverOrphanedProcessingJobs($redis, $dispatcher, $version);
+                $lastRecoveryAt = time();
             }
 
-            // If no high-priority job this round, try normal
-            if (!$queueItem) {
-                $queueItem = $redis->brpop([$queueNormal], 1);
-                if ($queueItem) {
-                    $highCount = 0; // Reset high-priority counter
-                }
-            }
-
-            // If still nothing, try low
-            if (!$queueItem) {
-                $queueItem = $redis->brpop([$queueLow], 1);
-                if ($queueItem) {
-                    $highCount = 0; // Reset high-priority counter
-                }
-            }
+            $scheduledPriority = $prioritySchedule[$priorityScheduleIndex];
+            $queueItem = $this->popNextJob(
+                $redis,
+                $queueMap,
+                $processingQueues,
+                $scheduledPriority
+            );
 
             // If nothing was found in any queue, sleep briefly and retry
             if (!$queueItem) {
                 usleep(500000); // 0.5 second sleep if no job
                 continue;
             }
+
+            $priorityScheduleIndex++;
+            if ($priorityScheduleIndex >= count($prioritySchedule)) {
+                $priorityScheduleIndex = 0;
+            }
             
+            $job = null;
+            $payload = null;
+            $processingQueueKey = $queueItem['processing_queue'];
+
             try {
-                $job = $queueItem[1]; // This is related to brpop array index.
+                $job = $queueItem['job'];
                 if (!$job) {
                     usleep(500000); // 0.5 second sleep if no job
                     continue;
@@ -151,10 +174,145 @@ class CCQueueWorkerCommand extends Command
                         $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $e->getMessage());
                     }
                 }
+            } finally {
+                if ($processingQueueKey && $job) {
+                    $redis->lrem($processingQueueKey, 1, $job);
+                }
             }
 
             $this->flushLogs();
         }
+    }
+
+    protected function buildWorkerId()
+    {
+        $host = function_exists('gethostname') ? gethostname() : 'unknown-host';
+        $host = preg_replace('/[^A-Za-z0-9_.-]/', '-', $host);
+
+        return $host . '-' . getmypid() . '-' . str_replace('.', '-', uniqid('', true));
+    }
+
+    protected function refreshHeartbeat($redis, $heartbeatKey, $heartbeatTtl)
+    {
+        $redis->setex($heartbeatKey, $heartbeatTtl, (string)time());
+    }
+
+    protected function startHeartbeatRefresher($heartbeatKey, $heartbeatTtl)
+    {
+        if (!function_exists('pcntl_fork')) {
+            return null;
+        }
+
+        $parentPid = getmypid();
+        $pid = pcntl_fork();
+        if ($pid === -1) {
+            return null;
+        }
+
+        if ($pid > 0) {
+            return $pid;
+        }
+
+        $interval = max(1, (int)floor($heartbeatTtl / 3));
+        while (true) {
+            if (function_exists('posix_kill') && !posix_kill($parentPid, 0)) {
+                exit(0);
+            }
+
+            try {
+                $redis = Redis::connection();
+                $this->refreshHeartbeat($redis, $heartbeatKey, $heartbeatTtl);
+            } catch (\Exception $e) {
+                // Heartbeat refresh failures are retried on the next interval.
+            }
+
+            sleep($interval);
+        }
+    }
+
+    protected function getHeartbeatKey($version, $workerId)
+    {
+        return 'cc-queue:' . $version . ':workers:' . $workerId . ':heartbeat';
+    }
+
+    protected function getProcessingQueueKey($version, $priority, $workerId)
+    {
+        return 'cc-queue:' . $version . ':processing:' . $priority . ':' . $workerId;
+    }
+
+    protected function popNextJob($redis, array $queueMap, array $processingQueues, $scheduledPriority)
+    {
+        $priorities = $this->getPriorityOrder($scheduledPriority);
+
+        foreach ($priorities as $priority) {
+            $job = $redis->rpoplpush($queueMap[$priority], $processingQueues[$priority]);
+            if ($job) {
+                return [
+                    'job' => $job,
+                    'processing_queue' => $processingQueues[$priority],
+                ];
+            }
+        }
+
+        return null;
+    }
+
+    protected function getPriorityOrder($scheduledPriority)
+    {
+        $priorities = [$scheduledPriority];
+
+        foreach (['high', 'normal', 'low'] as $priority) {
+            if ($priority !== $scheduledPriority) {
+                $priorities[] = $priority;
+            }
+        }
+
+        return $priorities;
+    }
+
+    protected function recoverOrphanedProcessingJobs($redis, JobDispatcher $dispatcher, $version)
+    {
+        $prefix = 'cc-queue:' . $version . ':processing:';
+        $processingKeys = $redis->keys($prefix . '*');
+
+        foreach ($processingKeys as $processingKey) {
+            $metadata = $this->parseProcessingQueueKey($processingKey, $prefix);
+            if (!$metadata) {
+                continue;
+            }
+
+            $heartbeatKey = $this->getHeartbeatKey($version, $metadata['worker_id']);
+            if ($redis->exists($heartbeatKey)) {
+                continue;
+            }
+
+            $queueKey = $dispatcher->getQueueKey($version, $metadata['priority']);
+            while ($redis->rpoplpush($processingKey, $queueKey)) {
+                // Move every orphaned entry back to its source priority queue.
+            }
+        }
+    }
+
+    protected function parseProcessingQueueKey($processingKey, $prefix)
+    {
+        if (strpos($processingKey, $prefix) !== 0) {
+            return null;
+        }
+
+        $remainder = substr($processingKey, strlen($prefix));
+        $parts = explode(':', $remainder, 2);
+        if (count($parts) !== 2) {
+            return null;
+        }
+
+        if (!in_array($parts[0], ['high', 'normal', 'low'])) {
+            return null;
+        }
+
+        return [
+            'priority' => $parts[0],
+            'worker_id' => $parts[1],
+        ];
     }
 
     protected function logFailedJob($job, $exception)
