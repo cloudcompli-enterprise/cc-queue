@@ -213,6 +213,18 @@ class CCQueueWorkerCommand extends Command
             return $pid;
         }
 
+        // Post-fork hygiene: drop any Redis connection inherited from the
+        // parent so the child opens its own socket instead of interleaving
+        // commands on a shared one.
+        try {
+            $inherited = Redis::connection();
+            if (method_exists($inherited, 'disconnect')) {
+                $inherited->disconnect();
+            }
+        } catch (\Exception $e) {
+            // No inherited connection to drop.
+        }
+
         $interval = max(1, (int)floor($heartbeatTtl / 3));
         while (true) {
             if (function_exists('posix_kill') && !posix_kill($parentPid, 0)) {
