@@ -159,20 +159,27 @@ class CCQueueWorkerCommand extends Command
 
     protected function logFailedJob($job, $exception)
     {
-        $jobData = json_decode($job, true);
-        $failedJob = [
-            'uuid' => json_decode($job, true)['uuid'],
-            'connection' => config('cc_queue.default'),
-            'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
-            'payload' => json_encode($jobData),
-            'exception' => json_encode([
-                'message' => $exception->getMessage(),
-                'trace' => $exception->getTrace()
-            ]), // Store exception as JSON string
-            'failed_at' => Carbon::now(),
-        ];
+        // Bookkeeping only - a logging failure must never kill the worker loop.
+        try {
+            $jobData = json_decode($job, true);
+            $failedJob = [
+                'uuid' => json_decode($job, true)['uuid'],
+                'connection' => config('cc_queue.default'),
+                'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
+                'payload' => json_encode($jobData),
+                // getTraceAsString(): raw getTrace() args can hold objects and
+                // closures that json_encode cannot serialize.
+                'exception' => json_encode([
+                    'message' => $exception->getMessage(),
+                    'trace' => $exception->getTraceAsString()
+                ]),
+                'failed_at' => Carbon::now(),
+            ];
 
-        DB::table('cc_queue_failed_jobs')->insert($failedJob);
+            DB::table('cc_queue_failed_jobs')->insert($failedJob);
+        } catch (\Exception $logError) {
+            $this->error('Failed to record failed job: ' . $logError->getMessage());
+        }
     }
 
     /**
