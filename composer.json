@@ -14,6 +14,11 @@
             "CCQueue\\": "src/"
         }
     },
+    "autoload-dev": {
+        "psr-4": {
+            "CCQueue\\Tests\\": "tests/"
+        }
+    },
     "require": {
         "illuminate/support": "^5.2|^10.0",
         "illuminate/queue": "^5.2|^10.0",
@@ -21,6 +26,10 @@
         "illuminate/contracts": "^5.2|^10.0",
         "php": ">=5.6.0|>=8.2.0",
         "ext-json": "*"
+    },
+    "require-dev": {
+        "illuminate/bus": "^5.2|^10.0",
+        "phpunit/phpunit": "^5.7|^9.6"
     },
     "extra" : {
         "laravel": {

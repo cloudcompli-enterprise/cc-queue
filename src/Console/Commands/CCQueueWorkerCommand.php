@@ -94,6 +94,9 @@ class CCQueueWorkerCommand extends Command
                 continue;
             }
             
+            $job = null;
+            $payload = null;
+
             try {
                 $job = $queueItem[1]; // This is related to brpop array index.
                 if (!$job) {
@@ -137,23 +140,33 @@ class CCQueueWorkerCommand extends Command
 
                 $redis->expire($jobStatusKey, 86400); // expire after 24 hours
             } catch (\Exception $e) {
-                // If an exception occurs, attempt to handle retries.
-                if (isset($payload['uuid'])) {
-                    $jobUuid = $payload['uuid'];
-                    $retryAttempt = $dispatcher->retryJob($payload, $retryLimit);
-                    $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
-                    $attempts = $currentAttempts + 1;
-
-                    if (!$retryAttempt) {
-                        $this->logFailedJob($job, $e);
-                        $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $e->getMessage());
-                    } else {
-                        $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $e->getMessage());
-                    }
-                }
+                $this->handleFailedJob($job, $payload, $e, $dispatcher, $retryLimit);
+            } catch (\Throwable $e) {
+                // PHP 7+ Errors (TypeError etc.) are not Exceptions and would otherwise kill the worker
+                // and strand the job in progress; on PHP 5.6 this clause parses but never matches.
+                $this->handleFailedJob($job, $payload, $e, $dispatcher, $retryLimit);
             }
 
             $this->flushLogs();
+        }
+    }
+
+    protected function handleFailedJob($job, $payload, $exception, JobDispatcher $dispatcher, $retryLimit)
+    {
+        if (!isset($payload['uuid'])) {
+            return;
+        }
+
+        $jobUuid = $payload['uuid'];
+        $retryAttempt = $dispatcher->retryJob($payload, $retryLimit);
+        $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+        $attempts = $currentAttempts + 1;
+
+        if (!$retryAttempt) {
+            $this->logFailedJob($job, $exception);
+            $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
+        } else {
+            $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
         }
     }
 
@@ -231,6 +244,7 @@ class CCQueueWorkerCommand extends Command
             error_log('', 4);
         } catch (\Exception $e) {
             // Silently handle any flushing errors
+        } catch (\Throwable $e) {
         }
     }
 }
