@@ -154,6 +154,7 @@ class CCQueueWorkerCommand extends Command
             $this->flushLogs();
         }
 
+        $this->restoreDefaultStopSignals();
         $this->info('Worker stopped: no job in progress.');
         Log::info('CCQueueWorkerCommand stopped');
         $this->flushLogs();
@@ -180,6 +181,18 @@ class CCQueueWorkerCommand extends Command
             });
         }
         $this->handlesStopSignals = true;
+    }
+
+    protected function restoreDefaultStopSignals()
+    {
+        if (!$this->handlesStopSignals) {
+            return;
+        }
+
+        foreach (array(SIGTERM, SIGINT, SIGQUIT) as $signal) {
+            pcntl_signal($signal, SIG_DFL);
+        }
+        $this->handlesStopSignals = false;
     }
 
     public function requestStop()
