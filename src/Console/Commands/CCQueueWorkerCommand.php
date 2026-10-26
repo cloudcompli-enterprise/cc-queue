@@ -22,6 +22,8 @@ class CCQueueWorkerCommand extends Command
     protected $jobHandlers = [];
     protected $retryLimit;
     protected $useBusDispatch = true;
+    protected $stopRequested = false;
+    protected $handlesStopSignals = false;
 
     public function __construct()
     {
@@ -60,7 +62,9 @@ class CCQueueWorkerCommand extends Command
         $highCount = 0;
         $highLimit = 5; // Number of high-priority jobs before checking normal/low
 
-        while (true) {
+        $this->listenForStopSignals();
+
+        while (!$this->shouldStop()) {
             $queueItem = null;
 
             // Weighted Fair Scheduling: Up to 5 high, then 1 normal, then 1 low, then repeat.
@@ -73,7 +77,7 @@ class CCQueueWorkerCommand extends Command
             }
 
             // If no high-priority job this round, try normal
-            if (!$queueItem) {
+            if (!$queueItem && !$this->shouldStop()) {
                 $queueItem = $redis->brpop([$queueNormal], 1);
                 if ($queueItem) {
                     $highCount = 0; // Reset high-priority counter
@@ -81,7 +85,7 @@ class CCQueueWorkerCommand extends Command
             }
 
             // If still nothing, try low
-            if (!$queueItem) {
+            if (!$queueItem && !$this->shouldStop()) {
                 $queueItem = $redis->brpop([$queueLow], 1);
                 if ($queueItem) {
                     $highCount = 0; // Reset high-priority counter
@@ -149,6 +153,61 @@ class CCQueueWorkerCommand extends Command
 
             $this->flushLogs();
         }
+
+        $this->restoreDefaultStopSignals();
+        $this->info('Worker stopped: no job in progress.');
+        Log::info('CCQueueWorkerCommand stopped');
+        $this->flushLogs();
+
+        return 0;
+    }
+
+    /**
+     * On SIGTERM, SIGINT or SIGQUIT the worker finishes the job it is running, takes no other, and exits,
+     * so a deploy or scale-in doesn't leave a job in_progress with nothing to requeue it.
+     */
+    protected function listenForStopSignals()
+    {
+        if (!function_exists('pcntl_signal')) {
+            Log::warning('CCQueueWorkerCommand: pcntl is not loaded, so a stop signal kills the job in progress.');
+
+            return;
+        }
+
+        $worker = $this;
+        foreach (array(SIGTERM, SIGINT, SIGQUIT) as $signal) {
+            pcntl_signal($signal, function () use ($worker) {
+                $worker->requestStop();
+            });
+        }
+        $this->handlesStopSignals = true;
+    }
+
+    protected function restoreDefaultStopSignals()
+    {
+        if (!$this->handlesStopSignals) {
+            return;
+        }
+
+        foreach (array(SIGTERM, SIGINT, SIGQUIT) as $signal) {
+            pcntl_signal($signal, SIG_DFL);
+        }
+        $this->handlesStopSignals = false;
+    }
+
+    public function requestStop()
+    {
+        $this->stopRequested = true;
+    }
+
+    protected function shouldStop()
+    {
+        // PHP 5.6 has no async signals: a signal that arrived during a job or a poll is delivered here.
+        if ($this->handlesStopSignals) {
+            pcntl_signal_dispatch();
+        }
+
+        return $this->stopRequested;
     }
 
     protected function handleFailedJob($job, $payload, $exception, JobDispatcher $dispatcher, $retryLimit)

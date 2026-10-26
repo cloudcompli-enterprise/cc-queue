@@ -6,6 +6,7 @@ class FakeRedis
 {
     public $lists = array();
     public $hashes = array();
+    public $onEmptyPoll;
     private $emptyPolls = 0;
 
     public function connection()
@@ -31,6 +32,10 @@ class FakeRedis
 
                 return array($key, array_pop($this->lists[$key]));
             }
+        }
+
+        if ($this->onEmptyPoll) {
+            call_user_func($this->onEmptyPoll);
         }
 
         // The worker polls high, normal and low in turn; three empty polls in a row means

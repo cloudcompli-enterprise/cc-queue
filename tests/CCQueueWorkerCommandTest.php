@@ -11,6 +11,7 @@ use CCQueue\Tests\Fakes\NullLogger;
 use CCQueue\Tests\Fakes\StopWorker;
 use CCQueue\Tests\Fakes\SyncBus;
 use CCQueue\Tests\Fakes\TestContainer;
+use CCQueue\Tests\Jobs\StopSignalJob;
 use CCQueue\Tests\Jobs\SucceedingJob;
 use Illuminate\Container\Container;
 use Illuminate\Support\Facades\Facade;
@@ -50,6 +51,7 @@ class CCQueueWorkerCommandTest extends TestCase
                     'type-error' => array('default' => 'CCQueue\Tests\Jobs\TypeErrorJob'),
                     'exception' => array('default' => 'CCQueue\Tests\Jobs\ExceptionJob'),
                     'succeeds' => array('default' => 'CCQueue\Tests\Jobs\SucceedingJob'),
+                    'stop-signal' => array('default' => 'CCQueue\Tests\Jobs\StopSignalJob'),
                 ),
             ),
         )));
@@ -60,6 +62,7 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->container->instance('Illuminate\Contracts\Bus\Dispatcher', new SyncBus());
 
         SucceedingJob::$handled = array();
+        StopSignalJob::$handled = array();
     }
 
     private function enqueue($type, $version)
@@ -82,6 +85,30 @@ class CCQueueWorkerCommandTest extends TestCase
         }
 
         $this->fail('Worker loop exited without draining the queue.');
+    }
+
+    private function runWorkerUntilItStops($version)
+    {
+        $command = new CCQueueWorkerCommand();
+        $command->setLaravel($this->container);
+        $output = new BufferedOutput();
+
+        try {
+            $exitCode = $command->run(new ArrayInput(array('version' => $version)), $output);
+        } catch (StopWorker $e) {
+            $this->fail("Worker kept polling after a stop signal:\n" . $output->fetch());
+        }
+
+        $this->assertSame(0, $exitCode);
+
+        return $output->fetch();
+    }
+
+    private function requireSignals()
+    {
+        if (!function_exists('pcntl_signal') || !function_exists('posix_kill')) {
+            $this->markTestSkipped('needs the pcntl and posix extensions');
+        }
     }
 
     private function status($uuid)
@@ -164,5 +191,54 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains('job blew up', $output);
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testStopSignalDuringAJobLetsItFinishAndTakesNoOther($version)
+    {
+        $this->requireSignals();
+        $signalled = $this->enqueue('stop-signal', $version);
+        $waiting = $this->enqueue('succeeds', $version);
+
+        $output = $this->runWorkerUntilItStops($version);
+
+        $this->assertSame(array($signalled), StopSignalJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($signalled));
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertSame(1, count($this->redis->lists['cc-queue:' . $version . ':tasks']));
+        $this->assertOutputContains('Worker stopped', $output);
+    }
+
+    public function testStopSignalWhileIdleStopsTheWorker()
+    {
+        $this->requireSignals();
+        $this->redis->onEmptyPoll = function () {
+            posix_kill(getmypid(), SIGTERM);
+        };
+
+        $output = $this->runWorkerUntilItStops('default');
+
+        $this->assertOutputContains('Worker stopped', $output);
+    }
+
+    public function testStopSignalDuringAnEmptyHighPollLeavesTheNormalQueueAlone()
+    {
+        $this->requireSignals();
+        $waiting = $this->enqueue('succeeds', 'default');
+        $signalled = false;
+        $this->redis->onEmptyPoll = function () use (&$signalled) {
+            if (!$signalled) {
+                $signalled = true;
+                posix_kill(getmypid(), SIGTERM);
+            }
+        };
+
+        $this->runWorkerUntilItStops('default');
+
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
     }
 }
