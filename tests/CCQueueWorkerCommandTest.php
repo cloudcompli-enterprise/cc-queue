@@ -223,4 +223,22 @@ class CCQueueWorkerCommandTest extends TestCase
 
         $this->assertOutputContains('Worker stopped', $output);
     }
+
+    public function testStopSignalDuringAnEmptyHighPollLeavesTheNormalQueueAlone()
+    {
+        $this->requireSignals();
+        $waiting = $this->enqueue('succeeds', 'default');
+        $signalled = false;
+        $this->redis->onEmptyPoll = function () use (&$signalled) {
+            if (!$signalled) {
+                $signalled = true;
+                posix_kill(getmypid(), SIGTERM);
+            }
+        };
+
+        $this->runWorkerUntilItStops('default');
+
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+    }
 }
