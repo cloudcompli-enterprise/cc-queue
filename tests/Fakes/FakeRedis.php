@@ -6,6 +6,7 @@ class FakeRedis
 {
     public $lists = array();
     public $hashes = array();
+    public $ttls = array();
     public $onEmptyPoll;
     private $emptyPolls = 0;
 
@@ -62,6 +63,8 @@ class FakeRedis
 
     public function expire($key, $seconds)
     {
+        $this->ttls[$key] = $seconds;
+
         return true;
     }
 }

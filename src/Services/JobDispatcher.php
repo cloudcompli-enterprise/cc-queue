@@ -21,15 +21,16 @@ class JobDispatcher
      *
      * @param array $payload
      * @param string|null $version
-     * @param int|null $expire The number of seconds until the job expires.
+     * @param int|null $expire Seconds until the job's hash expires; null takes `cc-queue.expire_jobs`, and with
+     *        neither the hash gets no TTL. A worker drops a job whose hash is gone, so a TTL here must outlast
+     *        the longest the job can wait in the queue.
      * @return void
      */
     public function enqueueJob(array $payload, $version = null, $expire = null)
     {
         $version = $version ?: $this->defaultVersion;
 
-        // Set the default expire status to 24 hours. (To prevent memory leaks)
-        $expireLength= is_null($expire) ? $expire : config('cc-queue.expire_jobs', 86400);
+        $expireLength = is_null($expire) ? config('cc-queue.expire_jobs') : $expire;
 
         if (empty($payload['uuid'])) {
             $payload['uuid'] = (string)UuidGenerator::generate();
@@ -120,12 +121,18 @@ class JobDispatcher
      * @param string $uuid
      * @param string $status
      * @param int|null $attempts
-     * @param int|null $expire The number of seconds until the job expires.
+     * @param int|null $expire Seconds until the job's hash expires. Null gives a finished job (completed or
+     *        failed) `cc-queue.expire_status`, 24 hours by default, and leaves a pending or in-progress job's
+     *        TTL alone, since a worker drops a job whose hash has expired while it waits in the queue.
      */
     public function updateJobStatus($uuid, $status, $attempts = null, $expire = null)
     {
-        // Set the default expire status to 24 hours.
-        $expireLength= is_null($expire) ? $expire : config('cc-queue.expire_status', 86400);
+        if (is_null($expire)) {
+            $finished = in_array($status, array(self::STATUS_COMPLETED, self::STATUS_FAILED), true);
+            $expireLength = $finished ? config('cc-queue.expire_status', 86400) : null;
+        } else {
+            $expireLength = $expire;
+        }
 
         $key = 'cc-queue:jobs:' . $uuid;
         $fields = [
@@ -158,7 +165,7 @@ class JobDispatcher
      */
     public function retryJob(array $payload, $retryLimit = null, $version = null)
     {
-        $retryLimit = $retryLimit ? config('cc-queue.retry_limit', 3) : $retryLimit;
+        $retryLimit = is_null($retryLimit) ? config('cc-queue.retry_limit', 3) : $retryLimit;
         $jobUuid = $payload['uuid'];
 
         $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
