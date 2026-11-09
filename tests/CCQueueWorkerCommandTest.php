@@ -5,12 +5,14 @@ namespace CCQueue\Tests;
 use CCQueue\Console\Commands\CCQueueWorkerCommand;
 use CCQueue\Services\JobDispatcher;
 use CCQueue\Tests\Fakes\FakeConfig;
+use CCQueue\Tests\Fakes\ErrorThrowingLogger;
 use CCQueue\Tests\Fakes\FakeDatabase;
 use CCQueue\Tests\Fakes\FakeRedis;
 use CCQueue\Tests\Fakes\NullLogger;
 use CCQueue\Tests\Fakes\StopWorker;
 use CCQueue\Tests\Fakes\SyncBus;
 use CCQueue\Tests\Fakes\TestContainer;
+use CCQueue\Tests\Jobs\DatabaseProbeJob;
 use CCQueue\Tests\Jobs\StopSignalJob;
 use CCQueue\Tests\Jobs\SucceedingJob;
 use Illuminate\Container\Container;
@@ -54,6 +56,9 @@ class CCQueueWorkerCommandTest extends TestCase
                     'succeeds' => array('default' => 'CCQueue\Tests\Jobs\SucceedingJob'),
                     'stop-signal' => array('default' => 'CCQueue\Tests\Jobs\StopSignalJob'),
                     'non-utf8' => array('default' => 'CCQueue\Tests\Jobs\NonUtf8MessageJob'),
+                    'transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakJob'),
+                    'pdo-transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\PdoTransactionLeakJob'),
+                    'db-probe' => array('default' => 'CCQueue\Tests\Jobs\DatabaseProbeJob'),
                 ),
             ),
         )));
@@ -65,6 +70,7 @@ class CCQueueWorkerCommandTest extends TestCase
 
         SucceedingJob::$handled = array();
         StopSignalJob::$handled = array();
+        DatabaseProbeJob::$handled = array();
     }
 
     private function enqueue($type, $version)
@@ -250,6 +256,84 @@ class CCQueueWorkerCommandTest extends TestCase
         $exception = json_decode($this->failedJobRow($broken)['exception'], true);
         $this->assertTrue(is_array($exception), 'the exception column holds JSON');
         $this->assertSame('RuntimeException', $exception['class']);
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testAFinalFailureInsideAnOpenTransactionIsRolledBackSoItIsRecordedAndTheNextJobCanWrite($version)
+    {
+        $leaking = $this->enqueue('transaction-leak', $version);
+        $probe = $this->enqueue('db-probe', $version);
+
+        $this->runWorker($version);
+
+        $this->assertSame(0, $this->db->level);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($probe));
+    }
+
+    public function testARetriedFailureInsideAnOpenTransactionDoesNotBreakTheJobsAfterIt()
+    {
+        $this->bootWithRetryLimit(3);
+        $leaking = $this->enqueue('transaction-leak', 'default');
+        $probe = $this->enqueue('db-probe', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $leaking);
+        $this->assertSame(3, $record['attempts']);
+        $this->assertSame(0, $this->db->level);
+    }
+
+    public function testATransactionOpenBeforeTheJobStartedIsLeftOpen()
+    {
+        $this->db->beginTransaction();
+        $leaking = $this->enqueue('transaction-leak', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(1, $this->db->level);
+        $this->assertTrue($this->db->pdo->inTransaction());
+        $this->assertSame(0, $this->db->pdo->rollBacks);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+    }
+
+    public function testATransactionOpenedOnThePdoDirectlyIsRolledBack()
+    {
+        $leaking = $this->enqueue('pdo-transaction-leak', 'default');
+        $probe = $this->enqueue('db-probe', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertFalse($this->db->pdo->inTransaction());
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+    }
+
+    public function testALoggerThatFailsWhileReportingAnUnrecordedFailureDoesNotEndTheWorker()
+    {
+        $logger = new ErrorThrowingLogger();
+        $this->container->instance('log', $logger);
+        $this->container->instance('Psr\Log\LoggerInterface', $logger);
+        Facade::clearResolvedInstances();
+        $this->db->insertFailure = new \RuntimeException('insert refused');
+        $broken = $this->enqueue('exception', 'default');
+        $healthy = $this->enqueue('succeeds', 'default');
+
+        $previousErrorLog = ini_set('error_log', '/dev/null');
+        try {
+            $this->runWorker('default');
+        } finally {
+            ini_set('error_log', $previousErrorLog);
+        }
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+        $this->assertSame(array($healthy), SucceedingJob::$handled);
     }
 
     /**

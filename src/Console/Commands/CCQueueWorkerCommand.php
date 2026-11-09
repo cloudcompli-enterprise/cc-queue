@@ -24,6 +24,7 @@ class CCQueueWorkerCommand extends Command
     protected $useBusDispatch = true;
     protected $stopRequested = false;
     protected $handlesStopSignals = false;
+    protected $transactionLevelAtJobStart;
 
     public function __construct()
     {
@@ -100,6 +101,7 @@ class CCQueueWorkerCommand extends Command
             
             $job = null;
             $payload = null;
+            $this->transactionLevelAtJobStart = null;
 
             try {
                 $job = $queueItem[1]; // This is related to brpop array index.
@@ -132,6 +134,7 @@ class CCQueueWorkerCommand extends Command
                     $jobRecord['attempts'] ? (int)$jobRecord['attempts'] : 0
                 );
 
+                $this->transactionLevelAtJobStart = $this->transactionLevel();
                 $this->processJob($payload);
 
                 // If processing succeeds, mark the job as "completed".
@@ -212,6 +215,8 @@ class CCQueueWorkerCommand extends Command
 
     protected function handleFailedJob($job, $payload, $exception, JobDispatcher $dispatcher, $retryLimit)
     {
+        $this->rollBackWhatTheJobLeftOpen();
+
         if (!isset($payload['uuid'])) {
             return;
         }
@@ -271,11 +276,63 @@ class CCQueueWorkerCommand extends Command
 
     protected function reportUnrecordedFailure($uuid, $error)
     {
-        $this->error("Could not record failed job {$uuid}: " . $error->getMessage());
-        Log::error('CCQueueWorkerCommand could not record a failed job', [
-            'uuid' => $uuid,
-            'error' => $error->getMessage(),
-        ]);
+        $message = "Could not record failed job {$uuid}: " . $error->getMessage();
+
+        try {
+            $this->error($message);
+            Log::error('CCQueueWorkerCommand could not record a failed job', [
+                'uuid' => $uuid,
+                'error' => $error->getMessage(),
+            ]);
+        } catch (\Exception $e) {
+            error_log('CCQueueWorkerCommand: ' . $message);
+        } catch (\Throwable $e) {
+            error_log('CCQueueWorkerCommand: ' . $message);
+        }
+    }
+
+    /**
+     * A transaction a failed job leaves open makes every later query on the connection fail, the failure
+     * record included. Only what the job opened is undone; a transaction its caller already held is kept.
+     */
+    protected function rollBackWhatTheJobLeftOpen()
+    {
+        $startLevel = $this->transactionLevelAtJobStart;
+        if ($startLevel === null) {
+            return;
+        }
+
+        try {
+            for ($i = 0; $i < 100 && DB::transactionLevel() > $startLevel; $i++) {
+                DB::rollBack();
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+
+        if ($startLevel > 0) {
+            return;
+        }
+
+        try {
+            $pdo = DB::connection()->getPdo();
+            if ($pdo && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+    }
+
+    protected function transactionLevel()
+    {
+        try {
+            return (int) DB::transactionLevel();
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+
+        return null;
     }
 
     /**
