@@ -219,6 +219,21 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
     }
 
+    public function testALegacyWorkerRetriesAJobOnTheLegacyQueue()
+    {
+        $this->bootWithRetryLimit(3);
+        $broken = $this->enqueue('exception', 'legacy');
+
+        $output = $this->runWorker('legacy');
+
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $broken);
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $record['status']);
+        $this->assertSame(3, $record['attempts']);
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertOutputContains("Job {$broken} failed; requeued (attempt 2)", $output);
+        $this->assertTrue(empty($this->redis->lists['cc-queue:default:tasks']), 'nothing reaches the default queue');
+    }
+
     public function testAPermanentFailureIsRecordedWithTheConfiguredConnection()
     {
         $broken = $this->enqueue('exception', 'default');
