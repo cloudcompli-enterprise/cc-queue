@@ -14,7 +14,7 @@ class PdoCommitJob extends BaseJob
         if (!empty($this->data['nested'])) {
             DB::beginTransaction();
         }
-        app('db')->getPdo()->commit();
+        app('db')->pdo->commit();
 
         throw new \RuntimeException('failed after committing on the PDO');
     }

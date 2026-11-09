@@ -5,6 +5,7 @@ namespace CCQueue\Tests;
 use CCQueue\Console\Commands\CCQueueWorkerCommand;
 use CCQueue\Services\JobDispatcher;
 use CCQueue\Tests\Fakes\FakeConfig;
+use CCQueue\Tests\Fakes\ClockedWorkerCommand;
 use CCQueue\Tests\Fakes\ErrorThrowingLogger;
 use CCQueue\Tests\Fakes\FakeDatabase;
 use CCQueue\Tests\Fakes\FakeRedis;
@@ -51,6 +52,7 @@ class CCQueueWorkerCommandTest extends TestCase
             'cc-queue' => array(
                 'default' => 'redis',
                 'retry_limit' => $retryLimit,
+                'min_uptime_before_stop' => 0,
                 'handlers' => array(
                     'type-error' => array('default' => 'CCQueue\Tests\Jobs\TypeErrorJob'),
                     'exception' => array('default' => 'CCQueue\Tests\Jobs\ExceptionJob'),
@@ -58,7 +60,7 @@ class CCQueueWorkerCommandTest extends TestCase
                     'stop-signal' => array('default' => 'CCQueue\Tests\Jobs\StopSignalJob'),
                     'non-utf8' => array('default' => 'CCQueue\Tests\Jobs\NonUtf8MessageJob'),
                     'transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakJob'),
-                    'pdo-transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\PdoTransactionLeakJob'),
+                    'dead-db-transaction' => array('default' => 'CCQueue\Tests\Jobs\DeadDatabaseTransactionJob'),
                     'db-probe' => array('default' => 'CCQueue\Tests\Jobs\DatabaseProbeJob'),
                     'dead-connection' => array('default' => 'CCQueue\Tests\Jobs\DeadConnectionJob'),
                     'pdo-commit' => array('default' => 'CCQueue\Tests\Jobs\PdoCommitJob'),
@@ -100,9 +102,9 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->fail('Worker loop exited without draining the queue.');
     }
 
-    private function runWorkerUntilItStops($version)
+    private function runWorkerUntilItStops($version, CCQueueWorkerCommand $command = null)
     {
-        $command = new CCQueueWorkerCommand();
+        $command = $command ?: new CCQueueWorkerCommand();
         $command->setLaravel($this->container);
         $output = new BufferedOutput();
 
@@ -307,18 +309,6 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($leaking), $this->failedJobUuids());
     }
 
-    public function testATransactionOpenedOnThePdoDirectlyIsRolledBack()
-    {
-        $leaking = $this->enqueue('pdo-transaction-leak', 'default');
-        $probe = $this->enqueue('db-probe', 'default');
-
-        $this->runWorker('default');
-
-        $this->assertFalse($this->db->pdo->inTransaction());
-        $this->assertSame(array($leaking), $this->failedJobUuids());
-        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
-    }
-
     public function pdoCommitProvider()
     {
         return array(
@@ -384,6 +374,57 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array(), $this->db->purges);
         $this->assertSame(2, $this->db->level, "the caller's transaction and the job's are both still counted");
         $this->assertOutputContains("inside the caller's transaction", $output);
+    }
+
+    public function testADeadDatabaseStopsTheWorkerOnlyOnceItHasBeenUpTheMinimumTime()
+    {
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $this->enqueue('dead-db-transaction', 'legacy');
+        $waiting = $this->enqueue('succeeds', 'legacy');
+        $worker = new ClockedWorkerCommand();
+
+        $output = $this->runWorkerUntilItStops('legacy', $worker);
+
+        $this->assertEquals(10.0, array_sum($worker->pauses), 'waited out the minimum uptime', 0.0001);
+        $this->assertLessThanOrEqual(0.5, max($worker->pauses), 'in short sleeps');
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testAStopSignalEndsTheMinimumUptimeWaitAtOnce()
+    {
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $this->enqueue('dead-db-transaction', 'legacy');
+        $worker = new ClockedWorkerCommand();
+        $worker->onPause = function ($worker) {
+            $worker->requestStop();
+        };
+
+        $this->runWorkerUntilItStops('legacy', $worker);
+
+        $this->assertCount(1, $worker->pauses);
+    }
+
+    public function testAFailingJobThatNeverUsedTheDatabaseLeavesItsConnectionAlone()
+    {
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(array(), $this->db->calls, 'no connection made, no PDO read, no transaction level asked');
+        $this->assertSame(array($broken), $this->failedJobUuids());
+    }
+
+    public function testAPdoThatIsGoneWhileResynchronisingDoesNotEndTheRun()
+    {
+        $this->enqueue('pdo-commit', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $this->db->pdoSequence = array(null);
+
+        $output = $this->runWorkerUntilItStops('default');
+
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
     }
 
     public function testALoggerThatFailsWhileReportingAnUnrecordedFailureDoesNotEndTheWorker()

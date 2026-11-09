@@ -11,7 +11,8 @@ namespace CCQueue\Tests\Fakes;
  *   (a dead connection, or no active transaction because the job committed on the PDO) leaves it stale;
  * - a SAVEPOINT, or a rollback to one, outside a real transaction is refused;
  * - purge() disconnects first, which is refused while the transaction count is above zero; with the default
- *   connection's name it then gives a fresh connection.
+ *   connection's name it then gives a fresh connection;
+ * - getConnections() lists the default connection only once something has used it.
  */
 class FakeDatabase
 {
@@ -24,6 +25,14 @@ class FakeDatabase
     public $aborted = false;
     public $pdo;
     public $purges = array();
+    public $opened = false;
+    public $pdoReads = 0;
+
+    /** @var array the connection-level calls made, in order: connection, getPdo, transactionLevel */
+    public $calls = array();
+
+    /** What the next getPdo() calls give instead of the PDO: an exception to throw, or null. */
+    public $pdoSequence = array();
 
     /** Laravel 10's setPdo() resets the transaction count, so disconnecting is never refused. */
     public $swapResetsTransactionCount = false;
@@ -37,11 +46,32 @@ class FakeDatabase
 
     public function connection($name = null)
     {
+        $this->calls[] = 'connection';
+        $this->opened = true;
+
         return $this;
+    }
+
+    public function getConnections()
+    {
+        return $this->opened ? array($this->getDefaultConnection() => $this) : array();
     }
 
     public function getPdo()
     {
+        $this->calls[] = 'getPdo';
+        $this->opened = true;
+        $this->pdoReads++;
+        if ($this->pdoSequence) {
+            $next = array_shift($this->pdoSequence);
+            if ($next instanceof \Exception) {
+                throw $next;
+            }
+            if ($next === null) {
+                return null;
+            }
+        }
+
         return $this->pdo;
     }
 
@@ -66,11 +96,13 @@ class FakeDatabase
             return;
         }
         $this->aborted = false;
+        $this->opened = false;
         $this->pdo = new FakePdo($this);
     }
 
     public function table($table)
     {
+        $this->opened = true;
         $this->table = $table;
 
         return $this;
@@ -92,11 +124,15 @@ class FakeDatabase
 
     public function transactionLevel()
     {
+        $this->calls[] = 'transactionLevel';
+
         return $this->level;
     }
 
+    /** Like Laravel 5.2, the count goes up before the PDO call, so a dead database leaves it at 1. */
     public function beginTransaction()
     {
+        $this->opened = true;
         $this->level++;
         if ($this->level === 1) {
             $this->pdo->beginTransaction();

@@ -25,6 +25,7 @@ class CCQueueWorkerCommand extends Command
     protected $stopRequested = false;
     protected $handlesStopSignals = false;
     protected $transactionLevelAtJobStart;
+    protected $startedAt;
 
     public function __construct()
     {
@@ -36,6 +37,7 @@ class CCQueueWorkerCommand extends Command
 
     public function handle()
     {
+        $this->startedAt = $this->now();
         Log::info('CCQueueWorkerCommand started');
 
         $version = $this->argument('version');
@@ -298,18 +300,21 @@ class CCQueueWorkerCommand extends Command
     /**
      * A transaction a failed job leaves open makes every later query on the connection fail, the failure
      * record included. Only what the job opened is undone; a transaction its caller already held is kept.
+     * Only a connection this process has already opened is looked at, and its PDO only when the connection's
+     * own rollback fails, so a job that never used the database doesn't open a connection here.
      */
     protected function rollBackWhatTheJobLeftOpen()
     {
         $startLevel = $this->transactionLevelAtJobStart;
-        if ($startLevel === null) {
+        $connection = $this->openedConnection();
+        if ($startLevel === null || $connection === null) {
             return;
         }
 
         $failed = false;
         try {
-            for ($i = 0; $i < 100 && DB::transactionLevel() > $startLevel; $i++) {
-                DB::rollBack();
+            for ($i = 0; $i < 100 && $connection->transactionLevel() > $startLevel; $i++) {
+                $connection->rollBack();
             }
         } catch (\Exception $e) {
             $failed = true;
@@ -317,27 +322,13 @@ class CCQueueWorkerCommand extends Command
             $failed = true;
         }
 
-        if ($startLevel > 0) {
-            $level = $this->transactionLevel();
-            if ($failed || $level === null || $level > $startLevel) {
-                $this->reportSafely('Could not roll back what a failed job left open inside the caller\'s transaction; the connection is left as it is.');
-            }
-
+        if (!$failed && $this->transactionLevel() === $startLevel) {
             return;
         }
 
-        try {
-            $pdo = DB::connection()->getPdo();
-            if ($pdo && $pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-        } catch (\Exception $e) {
-            $failed = true;
-        } catch (\Throwable $e) {
-            $failed = true;
-        }
+        if ($startLevel > 0) {
+            $this->reportSafely('Could not roll back what a failed job left open inside the caller\'s transaction; the connection is left as it is.');
 
-        if (!$failed && $this->transactionLevel() === 0) {
             return;
         }
 
@@ -345,7 +336,7 @@ class CCQueueWorkerCommand extends Command
         // connection's transaction count above the real state, and every later DB::transaction() would then
         // issue a SAVEPOINT outside a transaction. On Laravel 5.2 nothing public resets the count: disconnect()
         // and purge() refuse while it is above zero.
-        if ($this->resyncTransactionCount() === 0) {
+        if ($this->resyncTransactionCount($connection) === 0) {
             $this->reportSafely('A failed job left the database connection out of step; its transaction state was re-synchronised.');
 
             return;
@@ -362,6 +353,7 @@ class CCQueueWorkerCommand extends Command
             return;
         }
 
+        $this->waitOutMinimumUptime();
         $this->requestStop();
         $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
     }
@@ -373,25 +365,26 @@ class CCQueueWorkerCommand extends Command
      *
      * @return int|null the transaction level afterwards
      */
-    protected function resyncTransactionCount()
+    protected function resyncTransactionCount($connection)
     {
         try {
-            $connection = DB::connection();
             $pdo = $connection->getPdo();
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            $pdo->beginTransaction();
-            $grammar = $connection->getQueryGrammar();
-            $level = $connection->transactionLevel();
-            for ($n = 2; $n <= $level && $n <= 100; $n++) {
-                $pdo->exec($grammar->compileSavepoint('trans' . $n));
-            }
-            for ($i = 0; $i < 100 && $connection->transactionLevel() > 0; $i++) {
-                $connection->rollBack();
-            }
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
+            if ($pdo) {
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
+                $pdo->beginTransaction();
+                $grammar = $connection->getQueryGrammar();
+                $level = $connection->transactionLevel();
+                for ($n = 2; $n <= $level && $n <= 100; $n++) {
+                    $pdo->exec($grammar->compileSavepoint('trans' . $n));
+                }
+                for ($i = 0; $i < 100 && $connection->transactionLevel() > 0; $i++) {
+                    $connection->rollBack();
+                }
+                if ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
             }
         } catch (\Exception $e) {
         } catch (\Throwable $e) {
@@ -400,15 +393,60 @@ class CCQueueWorkerCommand extends Command
         return $this->transactionLevel();
     }
 
+    /**
+     * Supervisor marks a program FATAL, and stops restarting it, once it exits within startsecs a few times in
+     * a row, so the worker stays up `cc-queue.min_uptime_before_stop` seconds before it stops itself. A stop
+     * signal still ends the wait at once.
+     */
+    protected function waitOutMinimumUptime()
+    {
+        $minimum = (float) config('cc-queue.min_uptime_before_stop', 10);
+        for ($i = 0; $i < 10000 && !$this->shouldStop(); $i++) {
+            $remaining = $minimum - ($this->now() - $this->startedAt);
+            if ($remaining <= 0) {
+                return;
+            }
+            $this->pause(min(0.5, $remaining));
+        }
+    }
+
+    protected function now()
+    {
+        return microtime(true);
+    }
+
+    protected function pause($seconds)
+    {
+        usleep((int) round($seconds * 1000000));
+    }
+
+    /** @return int|null the default connection's transaction level: 0 if this process hasn't opened it, null if unreadable */
     protected function transactionLevel()
     {
         try {
-            return (int) DB::transactionLevel();
+            $connection = $this->openedConnection();
+
+            return $connection ? (int) $connection->transactionLevel() : 0;
         } catch (\Exception $e) {
         } catch (\Throwable $e) {
         }
 
         return null;
+    }
+
+    /** The default connection if this process has already made it; never makes one. */
+    protected function openedConnection()
+    {
+        try {
+            $connections = DB::getConnections();
+            $name = DB::getDefaultConnection();
+        } catch (\Exception $e) {
+            return null;
+        } catch (\Throwable $e) {
+            return null;
+        }
+
+        return isset($connections[$name]) ? $connections[$name] : null;
     }
 
     /**
