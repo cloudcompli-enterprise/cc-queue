@@ -217,22 +217,27 @@ class CCQueueWorkerCommand extends Command
 
     protected function handleFailedJob($job, $payload, $exception, JobDispatcher $dispatcher, $retryLimit)
     {
-        $this->rollBackWhatTheJobLeftOpen();
+        $connectionBeyondRepair = $this->rollBackWhatTheJobLeftOpen();
 
-        if (!isset($payload['uuid'])) {
-            return;
+        if (isset($payload['uuid'])) {
+            $jobUuid = $payload['uuid'];
+            $retryAttempt = $dispatcher->retryJob($payload, $retryLimit);
+            $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+            $attempts = $currentAttempts + 1;
+
+            if (!$retryAttempt) {
+                $this->logFailedJob($job, $exception);
+                $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
+            } else {
+                $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
+            }
         }
 
-        $jobUuid = $payload['uuid'];
-        $retryAttempt = $dispatcher->retryJob($payload, $retryLimit);
-        $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
-        $attempts = $currentAttempts + 1;
-
-        if (!$retryAttempt) {
-            $this->logFailedJob($job, $exception);
-            $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
-        } else {
-            $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
+        // Only once the job is requeued or recorded, so nothing sits in_progress while the worker waits.
+        if ($connectionBeyondRepair) {
+            $this->waitOutMinimumUptime();
+            $this->requestStop();
+            $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
         }
     }
 
@@ -302,13 +307,15 @@ class CCQueueWorkerCommand extends Command
      * record included. Only what the job opened is undone; a transaction its caller already held is kept.
      * Only a connection this process has already opened is looked at, and its PDO only when the connection's
      * own rollback fails, so a job that never used the database doesn't open a connection here.
+     *
+     * @return bool true when the connection's transaction state couldn't be repaired
      */
     protected function rollBackWhatTheJobLeftOpen()
     {
         $startLevel = $this->transactionLevelAtJobStart;
         $connection = $this->openedConnection();
         if ($startLevel === null || $connection === null) {
-            return;
+            return false;
         }
 
         $failed = false;
@@ -323,13 +330,13 @@ class CCQueueWorkerCommand extends Command
         }
 
         if (!$failed && $this->transactionLevel() === $startLevel) {
-            return;
+            return false;
         }
 
         if ($startLevel > 0) {
             $this->reportSafely('Could not roll back what a failed job left open inside the caller\'s transaction; the connection is left as it is.');
 
-            return;
+            return false;
         }
 
         // A rollback that throws (a job that ended its transaction on the PDO, or a dead connection) leaves the
@@ -339,7 +346,7 @@ class CCQueueWorkerCommand extends Command
         if ($this->resyncTransactionCount($connection) === 0) {
             $this->reportSafely('A failed job left the database connection out of step; its transaction state was re-synchronised.');
 
-            return;
+            return false;
         }
 
         try {
@@ -350,12 +357,10 @@ class CCQueueWorkerCommand extends Command
         if ($this->transactionLevel() === 0) {
             $this->reportSafely('A failed job left the database connection out of step; the connection was reset.');
 
-            return;
+            return false;
         }
 
-        $this->waitOutMinimumUptime();
-        $this->requestStop();
-        $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
+        return true;
     }
 
     /**

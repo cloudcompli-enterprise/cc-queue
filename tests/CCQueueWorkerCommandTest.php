@@ -379,16 +379,45 @@ class CCQueueWorkerCommandTest extends TestCase
     public function testADeadDatabaseStopsTheWorkerOnlyOnceItHasBeenUpTheMinimumTime()
     {
         $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
-        $this->enqueue('dead-db-transaction', 'legacy');
+        $broken = $this->enqueue('dead-db-transaction', 'legacy');
         $waiting = $this->enqueue('succeeds', 'legacy');
         $worker = new ClockedWorkerCommand();
+        $statusWhenTheWaitBegan = null;
+        $worker->onPause = function () use ($broken, &$statusWhenTheWaitBegan) {
+            if ($statusWhenTheWaitBegan === null) {
+                $statusWhenTheWaitBegan = $this->status($broken);
+            }
+        };
 
         $output = $this->runWorkerUntilItStops('legacy', $worker);
 
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $statusWhenTheWaitBegan, 'recorded as failed before the wait');
         $this->assertEquals(10.0, array_sum($worker->pauses), 'waited out the minimum uptime', 0.0001);
         $this->assertLessThanOrEqual(0.5, max($worker->pauses), 'in short sleeps');
         $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
         $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testAJobWithRetriesLeftIsRequeuedBeforeTheMinimumUptimeWait()
+    {
+        $this->bootWithRetryLimit(2);
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $broken = $this->enqueue('dead-db-transaction', 'default');
+        $worker = new ClockedWorkerCommand();
+        $whenTheWaitBegan = null;
+        $worker->onPause = function () use ($broken, &$whenTheWaitBegan) {
+            if ($whenTheWaitBegan === null) {
+                $whenTheWaitBegan = array(
+                    'status' => $this->status($broken),
+                    'queued' => count($this->redis->lists['cc-queue:default:tasks']),
+                );
+            }
+        };
+
+        $this->runWorkerUntilItStops('default', $worker);
+
+        $this->assertSame(array('status' => JobDispatcher::STATUS_PENDING, 'queued' => 1), $whenTheWaitBegan, 'requeued before the wait');
+        $this->assertNotEmpty($worker->pauses);
     }
 
     public function testAStopSignalEndsTheMinimumUptimeWaitAtOnce()
