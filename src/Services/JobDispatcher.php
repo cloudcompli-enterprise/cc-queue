@@ -152,9 +152,11 @@ class JobDispatcher
      *
      * @param array $payload
      * @param int|null $retryLimit
+     * @param string|null $version The queue family the job was claimed from. Without it, the payload's
+     *        `version`, which producers rarely set, so the job would fall back to the default family.
      * @return bool
      */
-    public function retryJob(array $payload, $retryLimit = null)
+    public function retryJob(array $payload, $retryLimit = null, $version = null)
     {
         $retryLimit = $retryLimit ? config('cc-queue.retry_limit', 3) : $retryLimit;
         $jobUuid = $payload['uuid'];
@@ -166,7 +168,9 @@ class JobDispatcher
             $this->updateJobStatus($jobUuid, self::STATUS_PENDING, $attempts);
             $updatedPayload = array_merge($payload, ['attempts' => $attempts]);
             $priority = isset($payload['priority']) ? strtolower($payload['priority']) : 'normal';
-            $version = isset($payload['version']) ? $payload['version'] : $this->defaultVersion;
+            if (!$version) {
+                $version = isset($payload['version']) ? $payload['version'] : $this->defaultVersion;
+            }
             $queueKey = $this->getQueueKey($version, $priority);
             Redis::lpush($queueKey, json_encode($updatedPayload));
             return true; // job requeued
