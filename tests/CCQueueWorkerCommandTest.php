@@ -269,6 +269,18 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($healthy), SucceedingJob::$handled);
     }
 
+    public function testAPermanentlyFailedJobsHashExpiresAfterADay()
+    {
+        $this->bootWithRetryLimit(2);
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $key = 'cc-queue:jobs:' . $broken;
+        $this->assertSame(86400, isset($this->redis->ttls[$key]) ? $this->redis->ttls[$key] : null);
+    }
+
     public function testAFailureWhoseMessageIsNotUtf8IsStillRecorded()
     {
         $broken = $this->enqueue('non-utf8', 'default');
