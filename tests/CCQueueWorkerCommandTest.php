@@ -5,14 +5,18 @@ namespace CCQueue\Tests;
 use CCQueue\Console\Commands\CCQueueWorkerCommand;
 use CCQueue\Services\JobDispatcher;
 use CCQueue\Tests\Fakes\FakeConfig;
+use CCQueue\Tests\Fakes\ClockedWorkerCommand;
+use CCQueue\Tests\Fakes\ErrorThrowingLogger;
 use CCQueue\Tests\Fakes\FakeDatabase;
 use CCQueue\Tests\Fakes\FakeRedis;
 use CCQueue\Tests\Fakes\NullLogger;
 use CCQueue\Tests\Fakes\StopWorker;
 use CCQueue\Tests\Fakes\SyncBus;
 use CCQueue\Tests\Fakes\TestContainer;
+use CCQueue\Tests\Jobs\DatabaseProbeJob;
 use CCQueue\Tests\Jobs\StopSignalJob;
 use CCQueue\Tests\Jobs\SucceedingJob;
+use CCQueue\Tests\Jobs\TransactionalJob;
 use Illuminate\Container\Container;
 use Illuminate\Support\Facades\Facade;
 use PHPUnit\Framework\TestCase;
@@ -46,12 +50,21 @@ class CCQueueWorkerCommandTest extends TestCase
 
         $this->container->instance('config', new FakeConfig(array(
             'cc-queue' => array(
+                'default' => 'redis',
                 'retry_limit' => $retryLimit,
+                'min_uptime_before_stop' => 0,
                 'handlers' => array(
                     'type-error' => array('default' => 'CCQueue\Tests\Jobs\TypeErrorJob'),
                     'exception' => array('default' => 'CCQueue\Tests\Jobs\ExceptionJob'),
                     'succeeds' => array('default' => 'CCQueue\Tests\Jobs\SucceedingJob'),
                     'stop-signal' => array('default' => 'CCQueue\Tests\Jobs\StopSignalJob'),
+                    'non-utf8' => array('default' => 'CCQueue\Tests\Jobs\NonUtf8MessageJob'),
+                    'transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakJob'),
+                    'dead-db-transaction' => array('default' => 'CCQueue\Tests\Jobs\DeadDatabaseTransactionJob'),
+                    'db-probe' => array('default' => 'CCQueue\Tests\Jobs\DatabaseProbeJob'),
+                    'dead-connection' => array('default' => 'CCQueue\Tests\Jobs\DeadConnectionJob'),
+                    'pdo-commit' => array('default' => 'CCQueue\Tests\Jobs\PdoCommitJob'),
+                    'transactional' => array('default' => 'CCQueue\Tests\Jobs\TransactionalJob'),
                 ),
             ),
         )));
@@ -63,13 +76,15 @@ class CCQueueWorkerCommandTest extends TestCase
 
         SucceedingJob::$handled = array();
         StopSignalJob::$handled = array();
+        DatabaseProbeJob::$handled = array();
+        TransactionalJob::$levelsAtStart = array();
     }
 
-    private function enqueue($type, $version)
+    private function enqueue($type, $version, array $data = array())
     {
         $dispatcher = new JobDispatcher();
 
-        return $dispatcher->enqueueJob(array('type' => $type, 'data' => array()), $version);
+        return $dispatcher->enqueueJob(array('type' => $type, 'data' => $data), $version);
     }
 
     private function runWorker($version)
@@ -87,9 +102,9 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->fail('Worker loop exited without draining the queue.');
     }
 
-    private function runWorkerUntilItStops($version)
+    private function runWorkerUntilItStops($version, CCQueueWorkerCommand $command = null)
     {
-        $command = new CCQueueWorkerCommand();
+        $command = $command ?: new CCQueueWorkerCommand();
         $command->setLaravel($this->container);
         $output = new BufferedOutput();
 
@@ -128,6 +143,17 @@ class CCQueueWorkerCommandTest extends TestCase
         }
 
         return $uuids;
+    }
+
+    private function failedJobRow($uuid)
+    {
+        foreach ($this->db->inserts['cc_queue_failed_jobs'] as $row) {
+            if ($row['uuid'] === $uuid) {
+                return $row;
+            }
+        }
+
+        $this->fail("No cc_queue_failed_jobs row for {$uuid}.");
     }
 
     private function assertOutputContains($needle, $output)
@@ -191,6 +217,265 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains('job blew up', $output);
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+    }
+
+    public function testAPermanentFailureIsRecordedWithTheConfiguredConnection()
+    {
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $row = $this->failedJobRow($broken);
+        $this->assertSame('redis', $row['connection']);
+        $this->assertSame('cc-queue:default:tasks', $row['queue']);
+        $payload = json_decode($row['payload'], true);
+        $this->assertSame($broken, $payload['uuid']);
+        $exception = json_decode($row['exception'], true);
+        $this->assertSame('RuntimeException', $exception['class']);
+        $this->assertSame('job blew up', $exception['message']);
+        $this->assertTrue(is_string($exception['trace']));
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testAFailureThatCannotBeRecordedDoesNotEndTheWorker($version)
+    {
+        $this->db->insertFailure = new \RuntimeException('null value in column "connection" violates not-null constraint');
+        $broken = $this->enqueue('exception', $version);
+        $healthy = $this->enqueue('succeeds', $version);
+
+        $output = $this->runWorker($version);
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertOutputContains("Could not record failed job {$broken}", $output);
+        $this->assertOutputContains("Job {$broken} failed permanently after 1 attempts", $output);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+        $this->assertSame(array($healthy), SucceedingJob::$handled);
+    }
+
+    public function testAFailureWhoseMessageIsNotUtf8IsStillRecorded()
+    {
+        $broken = $this->enqueue('non-utf8', 'default');
+
+        $this->runWorker('default');
+
+        $exception = json_decode($this->failedJobRow($broken)['exception'], true);
+        $this->assertTrue(is_array($exception), 'the exception column holds JSON');
+        $this->assertSame('RuntimeException', $exception['class']);
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testAFinalFailureInsideAnOpenTransactionIsRolledBackSoItIsRecordedAndTheNextJobCanWrite($version)
+    {
+        $leaking = $this->enqueue('transaction-leak', $version);
+        $probe = $this->enqueue('db-probe', $version);
+
+        $this->runWorker($version);
+
+        $this->assertSame(0, $this->db->level);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($probe));
+    }
+
+    public function testARetriedFailureInsideAnOpenTransactionDoesNotBreakTheJobsAfterIt()
+    {
+        $this->bootWithRetryLimit(3);
+        $leaking = $this->enqueue('transaction-leak', 'default');
+        $probe = $this->enqueue('db-probe', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $leaking);
+        $this->assertSame(3, $record['attempts']);
+        $this->assertSame(0, $this->db->level);
+    }
+
+    public function testATransactionOpenBeforeTheJobStartedIsLeftOpen()
+    {
+        $this->db->beginTransaction();
+        $leaking = $this->enqueue('transaction-leak', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(1, $this->db->level);
+        $this->assertTrue($this->db->pdo->inTransaction());
+        $this->assertSame(0, $this->db->pdo->rollBacks);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+    }
+
+    public function pdoCommitProvider()
+    {
+        return array(
+            'one level' => array(array()),
+            'nested' => array(array('nested' => true)),
+        );
+    }
+
+    /**
+     * @dataProvider pdoCommitProvider
+     */
+    public function testAJobThatCommittedOnThePdoIsResynchronisedSoLaterTransactionsStartAtZero(array $data)
+    {
+        $broken = $this->enqueue('pdo-commit', 'default', $data);
+        $later = $this->enqueue('transactional', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertSame(array(0), TransactionalJob::$levelsAtStart);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($later));
+        $this->assertSame(array(), $this->db->purges);
+        $this->assertOutputContains('re-synchronised', $output);
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testADeadConnectionTheWorkerCannotRepairStopsItSoAFreshOneStarts($version)
+    {
+        $this->enqueue('dead-connection', $version);
+        $waiting = $this->enqueue('succeeds', $version);
+
+        $output = $this->runWorkerUntilItStops($version);
+
+        $this->assertSame(array('pgsql'), $this->db->purges, 'a reset was tried');
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testWhereResettingTheConnectionClearsTheCountADeadConnectionIsReset()
+    {
+        $this->db->swapResetsTransactionCount = true;
+        $this->enqueue('dead-connection', 'default');
+        $later = $this->enqueue('transactional', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array('pgsql'), $this->db->purges);
+        $this->assertSame(array(0), TransactionalJob::$levelsAtStart);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($later));
+        $this->assertOutputContains('the connection was reset', $output);
+    }
+
+    public function testARollbackThatThrowsInsideACallersTransactionLeavesTheConnectionAlone()
+    {
+        $this->db->beginTransaction();
+        $this->enqueue('dead-connection', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array(), $this->db->purges);
+        $this->assertSame(2, $this->db->level, "the caller's transaction and the job's are both still counted");
+        $this->assertOutputContains("inside the caller's transaction", $output);
+    }
+
+    public function testADeadDatabaseStopsTheWorkerOnlyOnceItHasBeenUpTheMinimumTime()
+    {
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $broken = $this->enqueue('dead-db-transaction', 'legacy');
+        $waiting = $this->enqueue('succeeds', 'legacy');
+        $worker = new ClockedWorkerCommand();
+        $statusWhenTheWaitBegan = null;
+        $worker->onPause = function () use ($broken, &$statusWhenTheWaitBegan) {
+            if ($statusWhenTheWaitBegan === null) {
+                $statusWhenTheWaitBegan = $this->status($broken);
+            }
+        };
+
+        $output = $this->runWorkerUntilItStops('legacy', $worker);
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $statusWhenTheWaitBegan, 'recorded as failed before the wait');
+        $this->assertEquals(10.0, array_sum($worker->pauses), 'waited out the minimum uptime', 0.0001);
+        $this->assertLessThanOrEqual(0.5, max($worker->pauses), 'in short sleeps');
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testAJobWithRetriesLeftIsRequeuedBeforeTheMinimumUptimeWait()
+    {
+        $this->bootWithRetryLimit(2);
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $broken = $this->enqueue('dead-db-transaction', 'default');
+        $worker = new ClockedWorkerCommand();
+        $whenTheWaitBegan = null;
+        $worker->onPause = function () use ($broken, &$whenTheWaitBegan) {
+            if ($whenTheWaitBegan === null) {
+                $whenTheWaitBegan = array(
+                    'status' => $this->status($broken),
+                    'queued' => count($this->redis->lists['cc-queue:default:tasks']),
+                );
+            }
+        };
+
+        $this->runWorkerUntilItStops('default', $worker);
+
+        $this->assertSame(array('status' => JobDispatcher::STATUS_PENDING, 'queued' => 1), $whenTheWaitBegan, 'requeued before the wait');
+        $this->assertNotEmpty($worker->pauses);
+    }
+
+    public function testAStopSignalEndsTheMinimumUptimeWaitAtOnce()
+    {
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $this->enqueue('dead-db-transaction', 'legacy');
+        $worker = new ClockedWorkerCommand();
+        $worker->onPause = function ($worker) {
+            $worker->requestStop();
+        };
+
+        $this->runWorkerUntilItStops('legacy', $worker);
+
+        $this->assertCount(1, $worker->pauses);
+    }
+
+    public function testAFailingJobThatNeverUsedTheDatabaseLeavesItsConnectionAlone()
+    {
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(array(), $this->db->calls, 'no connection made, no PDO read, no transaction level asked');
+        $this->assertSame(array($broken), $this->failedJobUuids());
+    }
+
+    public function testAPdoThatIsGoneWhileResynchronisingDoesNotEndTheRun()
+    {
+        $this->enqueue('pdo-commit', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $this->db->pdoSequence = array(null);
+
+        $output = $this->runWorkerUntilItStops('default');
+
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testALoggerThatFailsWhileReportingAnUnrecordedFailureDoesNotEndTheWorker()
+    {
+        $logger = new ErrorThrowingLogger();
+        $this->container->instance('log', $logger);
+        $this->container->instance('Psr\Log\LoggerInterface', $logger);
+        Facade::clearResolvedInstances();
+        $this->db->insertFailure = new \RuntimeException('insert refused');
+        $broken = $this->enqueue('exception', 'default');
+        $healthy = $this->enqueue('succeeds', 'default');
+
+        $previousErrorLog = ini_set('error_log', '/dev/null');
+        try {
+            $this->runWorker('default');
+        } finally {
+            ini_set('error_log', $previousErrorLog);
+        }
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+        $this->assertSame(array($healthy), SucceedingJob::$handled);
     }
 
     /**
