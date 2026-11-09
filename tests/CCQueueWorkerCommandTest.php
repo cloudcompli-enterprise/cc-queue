@@ -15,6 +15,7 @@ use CCQueue\Tests\Fakes\TestContainer;
 use CCQueue\Tests\Jobs\DatabaseProbeJob;
 use CCQueue\Tests\Jobs\StopSignalJob;
 use CCQueue\Tests\Jobs\SucceedingJob;
+use CCQueue\Tests\Jobs\TransactionalJob;
 use Illuminate\Container\Container;
 use Illuminate\Support\Facades\Facade;
 use PHPUnit\Framework\TestCase;
@@ -59,6 +60,9 @@ class CCQueueWorkerCommandTest extends TestCase
                     'transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakJob'),
                     'pdo-transaction-leak' => array('default' => 'CCQueue\Tests\Jobs\PdoTransactionLeakJob'),
                     'db-probe' => array('default' => 'CCQueue\Tests\Jobs\DatabaseProbeJob'),
+                    'dead-connection' => array('default' => 'CCQueue\Tests\Jobs\DeadConnectionJob'),
+                    'pdo-commit' => array('default' => 'CCQueue\Tests\Jobs\PdoCommitJob'),
+                    'transactional' => array('default' => 'CCQueue\Tests\Jobs\TransactionalJob'),
                 ),
             ),
         )));
@@ -71,13 +75,14 @@ class CCQueueWorkerCommandTest extends TestCase
         SucceedingJob::$handled = array();
         StopSignalJob::$handled = array();
         DatabaseProbeJob::$handled = array();
+        TransactionalJob::$levelsAtStart = array();
     }
 
-    private function enqueue($type, $version)
+    private function enqueue($type, $version, array $data = array())
     {
         $dispatcher = new JobDispatcher();
 
-        return $dispatcher->enqueueJob(array('type' => $type, 'data' => array()), $version);
+        return $dispatcher->enqueueJob(array('type' => $type, 'data' => $data), $version);
     }
 
     private function runWorker($version)
@@ -312,6 +317,73 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertFalse($this->db->pdo->inTransaction());
         $this->assertSame(array($leaking), $this->failedJobUuids());
         $this->assertSame(array($probe), DatabaseProbeJob::$handled);
+    }
+
+    public function pdoCommitProvider()
+    {
+        return array(
+            'one level' => array(array()),
+            'nested' => array(array('nested' => true)),
+        );
+    }
+
+    /**
+     * @dataProvider pdoCommitProvider
+     */
+    public function testAJobThatCommittedOnThePdoIsResynchronisedSoLaterTransactionsStartAtZero(array $data)
+    {
+        $broken = $this->enqueue('pdo-commit', 'default', $data);
+        $later = $this->enqueue('transactional', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertSame(array(0), TransactionalJob::$levelsAtStart);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($later));
+        $this->assertSame(array(), $this->db->purges);
+        $this->assertOutputContains('re-synchronised', $output);
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testADeadConnectionTheWorkerCannotRepairStopsItSoAFreshOneStarts($version)
+    {
+        $this->enqueue('dead-connection', $version);
+        $waiting = $this->enqueue('succeeds', $version);
+
+        $output = $this->runWorkerUntilItStops($version);
+
+        $this->assertSame(array('pgsql'), $this->db->purges, 'a reset was tried');
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function testWhereResettingTheConnectionClearsTheCountADeadConnectionIsReset()
+    {
+        $this->db->swapResetsTransactionCount = true;
+        $this->enqueue('dead-connection', 'default');
+        $later = $this->enqueue('transactional', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array('pgsql'), $this->db->purges);
+        $this->assertSame(array(0), TransactionalJob::$levelsAtStart);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($later));
+        $this->assertOutputContains('the connection was reset', $output);
+    }
+
+    public function testARollbackThatThrowsInsideACallersTransactionLeavesTheConnectionAlone()
+    {
+        $this->db->beginTransaction();
+        $this->enqueue('dead-connection', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array(), $this->db->purges);
+        $this->assertSame(2, $this->db->level, "the caller's transaction and the job's are both still counted");
+        $this->assertOutputContains("inside the caller's transaction", $output);
     }
 
     public function testALoggerThatFailsWhileReportingAnUnrecordedFailureDoesNotEndTheWorker()

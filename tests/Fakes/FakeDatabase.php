@@ -3,8 +3,15 @@
 namespace CCQueue\Tests\Fakes;
 
 /**
- * A database connection as the worker sees it through the DB facade. Like Postgres, a statement that fails
- * inside a transaction aborts it: every later insert is refused until a rollback.
+ * The database manager and its default connection, as the worker sees them through the DB facade, modelled
+ * on Laravel 5.2 over Postgres:
+ * - a statement that fails inside a transaction aborts it, and every later insert is refused until a rollback;
+ * - beginTransaction() past level 1 creates savepoint trans{level}, and rollBack() returns to it;
+ * - rollBack() decrements the transaction count only after the PDO call returns, so a rollback that throws
+ *   (a dead connection, or no active transaction because the job committed on the PDO) leaves it stale;
+ * - a SAVEPOINT, or a rollback to one, outside a real transaction is refused;
+ * - purge() disconnects first, which is refused while the transaction count is above zero; with the default
+ *   connection's name it then gives a fresh connection.
  */
 class FakeDatabase
 {
@@ -16,6 +23,10 @@ class FakeDatabase
     public $level = 0;
     public $aborted = false;
     public $pdo;
+    public $purges = array();
+
+    /** Laravel 10's setPdo() resets the transaction count, so disconnecting is never refused. */
+    public $swapResetsTransactionCount = false;
 
     private $table;
 
@@ -34,6 +45,30 @@ class FakeDatabase
         return $this->pdo;
     }
 
+    public function getQueryGrammar()
+    {
+        return new FakeGrammar();
+    }
+
+    public function getDefaultConnection()
+    {
+        return 'pgsql';
+    }
+
+    public function purge($name = null)
+    {
+        $this->purges[] = $name;
+        if ($this->level >= 1 && !$this->swapResetsTransactionCount) {
+            throw new \RuntimeException("Can't swap PDO instance while within transaction.");
+        }
+        $this->level = 0;
+        if ($name !== $this->getDefaultConnection()) {
+            return;
+        }
+        $this->aborted = false;
+        $this->pdo = new FakePdo($this);
+    }
+
     public function table($table)
     {
         $this->table = $table;
@@ -46,6 +81,7 @@ class FakeDatabase
         if ($this->insertFailure) {
             throw $this->insertFailure;
         }
+        $this->pdo->assertAlive();
         if ($this->aborted) {
             throw new \RuntimeException('current transaction is aborted, commands ignored until end of transaction block');
         }
@@ -63,8 +99,27 @@ class FakeDatabase
     {
         $this->level++;
         if ($this->level === 1) {
-            $this->pdo->open = true;
+            $this->pdo->beginTransaction();
+        } else {
+            $this->pdo->exec('SAVEPOINT trans' . $this->level);
         }
+    }
+
+    public function transaction(\Closure $callback)
+    {
+        $this->beginTransaction();
+        $result = $callback($this);
+        $this->commit();
+
+        return $result;
+    }
+
+    public function commit()
+    {
+        if ($this->level === 1) {
+            $this->pdo->commit();
+        }
+        $this->level--;
     }
 
     /** Rolling back to a savepoint, or out of the transaction, clears an aborted state. */
@@ -73,10 +128,12 @@ class FakeDatabase
         if ($this->level === 0) {
             return;
         }
-        $this->level--;
-        if ($this->level === 0) {
-            $this->pdo->open = false;
+        if ($this->level === 1) {
+            $this->pdo->rollBack();
+        } else {
+            $this->pdo->exec('ROLLBACK TO SAVEPOINT trans' . $this->level);
         }
+        $this->level--;
         $this->aborted = false;
     }
 }

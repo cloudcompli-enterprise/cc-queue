@@ -276,14 +276,18 @@ class CCQueueWorkerCommand extends Command
 
     protected function reportUnrecordedFailure($uuid, $error)
     {
-        $message = "Could not record failed job {$uuid}: " . $error->getMessage();
+        $this->reportSafely("Could not record failed job {$uuid}: " . $error->getMessage(), [
+            'uuid' => $uuid,
+            'error' => $error->getMessage(),
+        ]);
+    }
 
+    /** Reports through the console and the log; falls back to error_log() if either throws. */
+    protected function reportSafely($message, array $context = [])
+    {
         try {
             $this->error($message);
-            Log::error('CCQueueWorkerCommand could not record a failed job', [
-                'uuid' => $uuid,
-                'error' => $error->getMessage(),
-            ]);
+            Log::error('CCQueueWorkerCommand: ' . $message, $context);
         } catch (\Exception $e) {
             error_log('CCQueueWorkerCommand: ' . $message);
         } catch (\Throwable $e) {
@@ -302,15 +306,23 @@ class CCQueueWorkerCommand extends Command
             return;
         }
 
+        $failed = false;
         try {
             for ($i = 0; $i < 100 && DB::transactionLevel() > $startLevel; $i++) {
                 DB::rollBack();
             }
         } catch (\Exception $e) {
+            $failed = true;
         } catch (\Throwable $e) {
+            $failed = true;
         }
 
         if ($startLevel > 0) {
+            $level = $this->transactionLevel();
+            if ($failed || $level === null || $level > $startLevel) {
+                $this->reportSafely('Could not roll back what a failed job left open inside the caller\'s transaction; the connection is left as it is.');
+            }
+
             return;
         }
 
@@ -320,8 +332,72 @@ class CCQueueWorkerCommand extends Command
                 $pdo->rollBack();
             }
         } catch (\Exception $e) {
+            $failed = true;
+        } catch (\Throwable $e) {
+            $failed = true;
+        }
+
+        if (!$failed && $this->transactionLevel() === 0) {
+            return;
+        }
+
+        // A rollback that throws (a job that ended its transaction on the PDO, or a dead connection) leaves the
+        // connection's transaction count above the real state, and every later DB::transaction() would then
+        // issue a SAVEPOINT outside a transaction. On Laravel 5.2 nothing public resets the count: disconnect()
+        // and purge() refuse while it is above zero.
+        if ($this->resyncTransactionCount() === 0) {
+            $this->reportSafely('A failed job left the database connection out of step; its transaction state was re-synchronised.');
+
+            return;
+        }
+
+        try {
+            DB::purge(DB::getDefaultConnection());
+        } catch (\Exception $e) {
         } catch (\Throwable $e) {
         }
+        if ($this->transactionLevel() === 0) {
+            $this->reportSafely('A failed job left the database connection out of step; the connection was reset.');
+
+            return;
+        }
+
+        $this->requestStop();
+        $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
+    }
+
+    /**
+     * Brings the connection's transaction count back to zero through its own rollbacks: ends whatever real
+     * transaction the job left, opens a fresh one with the savepoints the count implies, and rolls back.
+     * Fails, leaving the count as it was, when the connection itself is gone.
+     *
+     * @return int|null the transaction level afterwards
+     */
+    protected function resyncTransactionCount()
+    {
+        try {
+            $connection = DB::connection();
+            $pdo = $connection->getPdo();
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            $pdo->beginTransaction();
+            $grammar = $connection->getQueryGrammar();
+            $level = $connection->transactionLevel();
+            for ($n = 2; $n <= $level && $n <= 100; $n++) {
+                $pdo->exec($grammar->compileSavepoint('trans' . $n));
+            }
+            for ($i = 0; $i < 100 && $connection->transactionLevel() > 0; $i++) {
+                $connection->rollBack();
+            }
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        } catch (\Exception $e) {
+        } catch (\Throwable $e) {
+        }
+
+        return $this->transactionLevel();
     }
 
     protected function transactionLevel()
