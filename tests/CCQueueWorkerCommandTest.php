@@ -46,12 +46,14 @@ class CCQueueWorkerCommandTest extends TestCase
 
         $this->container->instance('config', new FakeConfig(array(
             'cc-queue' => array(
+                'default' => 'redis',
                 'retry_limit' => $retryLimit,
                 'handlers' => array(
                     'type-error' => array('default' => 'CCQueue\Tests\Jobs\TypeErrorJob'),
                     'exception' => array('default' => 'CCQueue\Tests\Jobs\ExceptionJob'),
                     'succeeds' => array('default' => 'CCQueue\Tests\Jobs\SucceedingJob'),
                     'stop-signal' => array('default' => 'CCQueue\Tests\Jobs\StopSignalJob'),
+                    'non-utf8' => array('default' => 'CCQueue\Tests\Jobs\NonUtf8MessageJob'),
                 ),
             ),
         )));
@@ -130,6 +132,17 @@ class CCQueueWorkerCommandTest extends TestCase
         return $uuids;
     }
 
+    private function failedJobRow($uuid)
+    {
+        foreach ($this->db->inserts['cc_queue_failed_jobs'] as $row) {
+            if ($row['uuid'] === $uuid) {
+                return $row;
+            }
+        }
+
+        $this->fail("No cc_queue_failed_jobs row for {$uuid}.");
+    }
+
     private function assertOutputContains($needle, $output)
     {
         $this->assertTrue(strpos($output, $needle) !== false, "Worker output does not contain [{$needle}]:\n{$output}");
@@ -191,6 +204,52 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains('job blew up', $output);
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+    }
+
+    public function testAPermanentFailureIsRecordedWithTheConfiguredConnection()
+    {
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $row = $this->failedJobRow($broken);
+        $this->assertSame('redis', $row['connection']);
+        $this->assertSame('cc-queue:default:tasks', $row['queue']);
+        $payload = json_decode($row['payload'], true);
+        $this->assertSame($broken, $payload['uuid']);
+        $exception = json_decode($row['exception'], true);
+        $this->assertSame('RuntimeException', $exception['class']);
+        $this->assertSame('job blew up', $exception['message']);
+        $this->assertTrue(is_string($exception['trace']));
+    }
+
+    /**
+     * @dataProvider versionProvider
+     */
+    public function testAFailureThatCannotBeRecordedDoesNotEndTheWorker($version)
+    {
+        $this->db->insertFailure = new \RuntimeException('null value in column "connection" violates not-null constraint');
+        $broken = $this->enqueue('exception', $version);
+        $healthy = $this->enqueue('succeeds', $version);
+
+        $output = $this->runWorker($version);
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertOutputContains("Could not record failed job {$broken}", $output);
+        $this->assertOutputContains("Job {$broken} failed permanently after 1 attempts", $output);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+        $this->assertSame(array($healthy), SucceedingJob::$handled);
+    }
+
+    public function testAFailureWhoseMessageIsNotUtf8IsStillRecorded()
+    {
+        $broken = $this->enqueue('non-utf8', 'default');
+
+        $this->runWorker('default');
+
+        $exception = json_decode($this->failedJobRow($broken)['exception'], true);
+        $this->assertTrue(is_array($exception), 'the exception column holds JSON');
+        $this->assertSame('RuntimeException', $exception['class']);
     }
 
     /**

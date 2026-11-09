@@ -229,22 +229,53 @@ class CCQueueWorkerCommand extends Command
         }
     }
 
+    /**
+     * Runs inside the worker's failure handling, so it must not throw: an exception here would end
+     * the worker with queued work waiting until supervisor restarts it.
+     */
     protected function logFailedJob($job, $exception)
     {
         $jobData = json_decode($job, true);
-        $failedJob = [
-            'uuid' => json_decode($job, true)['uuid'],
-            'connection' => config('cc_queue.default'),
-            'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
-            'payload' => json_encode($jobData),
-            'exception' => json_encode([
-                'message' => $exception->getMessage(),
-                'trace' => $exception->getTrace()
-            ]), // Store exception as JSON string
-            'failed_at' => Carbon::now(),
-        ];
+        $uuid = isset($jobData['uuid']) ? $jobData['uuid'] : null;
 
-        DB::table('cc_queue_failed_jobs')->insert($failedJob);
+        try {
+            DB::table('cc_queue_failed_jobs')->insert([
+                'uuid' => $uuid,
+                'connection' => config('cc-queue.default', 'redis'),
+                'queue' => 'cc-queue:' . $this->argument('version') . ':tasks',
+                'payload' => $job,
+                'exception' => $this->describeException($exception),
+                'failed_at' => Carbon::now(),
+            ]);
+        } catch (\Exception $e) {
+            $this->reportUnrecordedFailure($uuid, $e);
+        } catch (\Throwable $e) {
+            $this->reportUnrecordedFailure($uuid, $e);
+        }
+    }
+
+    /**
+     * getTrace() is avoided because its argument values can be objects that don't encode, or secrets.
+     */
+    protected function describeException($exception)
+    {
+        $description = json_encode([
+            'class' => get_class($exception),
+            'message' => $exception->getMessage(),
+            'file' => $exception->getFile() . ':' . $exception->getLine(),
+            'trace' => $exception->getTraceAsString(),
+        ], JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+        return $description !== false ? $description : json_encode(['class' => get_class($exception)]);
+    }
+
+    protected function reportUnrecordedFailure($uuid, $error)
+    {
+        $this->error("Could not record failed job {$uuid}: " . $error->getMessage());
+        Log::error('CCQueueWorkerCommand could not record a failed job', [
+            'uuid' => $uuid,
+            'error' => $error->getMessage(),
+        ]);
     }
 
     /**
