@@ -82,11 +82,33 @@ class JobDispatcherTest extends TestCase
         $this->assertSame(1, $this->queued('cc-queue:default:tasks'));
     }
 
-    public function testARetryKeepsItsPriority()
+    public function priorityProvider()
     {
-        $this->retry(array('priority' => 'high'), 'legacy');
+        return array(
+            'high' => array(array('priority' => 'high'), 'cc-queue:legacy:tasks:high'),
+            'low' => array(array('priority' => 'low'), 'cc-queue:legacy:tasks:low'),
+            'normal, as none is given' => array(array(), 'cc-queue:legacy:tasks'),
+        );
+    }
 
-        $this->assertSame(1, $this->queued('cc-queue:legacy:tasks:high'));
+    /**
+     * @dataProvider priorityProvider
+     */
+    public function testARetryKeepsItsPriority(array $payload, $destination)
+    {
+        $this->retry($payload, 'legacy');
+
+        $lists = array(
+            'cc-queue:legacy:tasks:high',
+            'cc-queue:legacy:tasks',
+            'cc-queue:legacy:tasks:low',
+            'cc-queue:default:tasks:high',
+            'cc-queue:default:tasks',
+            'cc-queue:default:tasks:low',
+        );
+        foreach ($lists as $list) {
+            $this->assertSame($list === $destination ? 1 : 0, $this->queued($list), $list);
+        }
     }
 
     public function testEnqueueHonoursAnExplicitExpiry()

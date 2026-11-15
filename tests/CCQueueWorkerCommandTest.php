@@ -10,6 +10,7 @@ use CCQueue\Tests\Fakes\ErrorThrowingLogger;
 use CCQueue\Tests\Fakes\FakeDatabase;
 use CCQueue\Tests\Fakes\FakeRedis;
 use CCQueue\Tests\Fakes\NullLogger;
+use CCQueue\Tests\Fakes\RecordingLogger;
 use CCQueue\Tests\Fakes\StopWorker;
 use CCQueue\Tests\Fakes\SyncBus;
 use CCQueue\Tests\Fakes\TestContainer;
@@ -65,6 +66,8 @@ class CCQueueWorkerCommandTest extends TestCase
                     'dead-connection' => array('default' => 'CCQueue\Tests\Jobs\DeadConnectionJob'),
                     'pdo-commit' => array('default' => 'CCQueue\Tests\Jobs\PdoCommitJob'),
                     'transactional' => array('default' => 'CCQueue\Tests\Jobs\TransactionalJob'),
+                    'nul-message' => array('default' => 'CCQueue\Tests\Jobs\NulMessageJob'),
+                    'transaction-leak-return' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakReturnJob'),
                 ),
             ),
         )));
@@ -119,11 +122,38 @@ class CCQueueWorkerCommandTest extends TestCase
         return $output->fetch();
     }
 
+    private function useRecordingLogger()
+    {
+        $logger = new RecordingLogger();
+        $this->container->instance('log', $logger);
+        $this->container->instance('Psr\Log\LoggerInterface', $logger);
+        Facade::clearResolvedInstances();
+
+        return $logger;
+    }
+
+    private function assertStrandedJobReport(RecordingLogger $logger, $uuid, $redisMessage)
+    {
+        $this->assertCount(1, $logger->errors);
+        $report = $logger->errors[0];
+        $this->assertTrue(strpos($report['message'], $uuid) !== false, 'the report names the job');
+        $this->assertTrue(strpos($report['message'], 'may be stranded') !== false);
+        $this->assertSame($uuid, $report['context']['uuid']);
+        $payload = json_decode($report['context']['payload'], true);
+        $this->assertSame($uuid, $payload['uuid']);
+        $this->assertSame($redisMessage, $report['context']['error']);
+    }
+
     private function requireSignals()
     {
         if (!function_exists('pcntl_signal') || !function_exists('posix_kill')) {
             $this->markTestSkipped('needs the pcntl and posix extensions');
         }
+    }
+
+    private function pushedTo($queue)
+    {
+        return isset($this->redis->pushes[$queue]) ? $this->redis->pushes[$queue] : 0;
     }
 
     private function status($uuid)
@@ -231,7 +261,25 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(3, $record['attempts']);
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains("Job {$broken} failed; requeued (attempt 2)", $output);
-        $this->assertTrue(empty($this->redis->lists['cc-queue:default:tasks']), 'nothing reaches the default queue');
+        $this->assertSame(3, $this->pushedTo('cc-queue:legacy:tasks'), 'the job and its two retries');
+        $this->assertSame(0, $this->pushedTo('cc-queue:default:tasks'));
+    }
+
+    public function testARetryStaysOnTheWorkersFamilyWhenThePayloadNamesAnother()
+    {
+        $this->bootWithRetryLimit(3);
+        $dispatcher = new JobDispatcher();
+        $broken = $dispatcher->enqueueJob(array('type' => 'exception', 'data' => array(), 'version' => 'default'), 'legacy');
+
+        $output = $this->runWorker('legacy');
+
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $broken);
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $record['status']);
+        $this->assertSame(3, $record['attempts']);
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertOutputContains("Job {$broken} failed permanently after 3 attempts", $output);
+        $this->assertSame(3, $this->pushedTo('cc-queue:legacy:tasks'), 'the job and its two retries');
+        $this->assertSame(0, $this->pushedTo('cc-queue:default:tasks'));
     }
 
     public function testAPermanentFailureIsRecordedWithTheConfiguredConnection()
@@ -503,6 +551,128 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
         $this->assertSame(array($healthy), SucceedingJob::$handled);
+    }
+
+    public function testARedisFailureWhileRequeuingAJobIsReportedAndStopsTheWorkerCleanlyOnceItHasBeenUpTheMinimumTime()
+    {
+        $this->bootWithRetryLimit(2);
+        $logger = $this->useRecordingLogger();
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $stranded = $this->enqueue('exception', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $this->redis->failOnCall('hmset', 2, 'OOM command not allowed when used memory > maxmemory');
+        $worker = new ClockedWorkerCommand();
+        $reportsWhenTheWaitBegan = null;
+        $worker->onPause = function () use ($logger, &$reportsWhenTheWaitBegan) {
+            if ($reportsWhenTheWaitBegan === null) {
+                $reportsWhenTheWaitBegan = count($logger->errors);
+            }
+        };
+
+        $output = $this->runWorkerUntilItStops('default', $worker);
+
+        $this->assertStrandedJobReport($logger, $stranded, 'OOM command not allowed when used memory > maxmemory');
+        $this->assertSame(1, $reportsWhenTheWaitBegan, 'reported before the wait');
+        $this->assertEquals(10.0, array_sum($worker->pauses), 'waited out the minimum uptime', 0.0001);
+        $this->assertOutputContains("Job {$stranded} may be stranded", $output);
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertSame(array(), SucceedingJob::$handled);
+    }
+
+    public function testARedisFailureWhileWritingAPermanentFailureIsReportedAndStopsTheWorkerCleanly()
+    {
+        $logger = $this->useRecordingLogger();
+        $stranded = $this->enqueue('exception', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $this->redis->failOnCall('hmset', 2);
+
+        $output = $this->runWorkerUntilItStops('default');
+
+        $this->assertStrandedJobReport($logger, $stranded, 'LOADING Redis is loading the dataset in memory');
+        $this->assertSame(JobDispatcher::STATUS_IN_PROGRESS, $this->status($stranded));
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertOutputContains('may be stranded', $output);
+    }
+
+    public function testARedisFailureWhileMarkingASuccessfulJobCompletedIsReportedAndStopsTheWorkerCleanly()
+    {
+        $logger = $this->useRecordingLogger();
+        $ran = $this->enqueue('succeeds', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $this->redis->failOnCall('hmset', 2, 'LOADING Redis is loading the dataset in memory', true);
+
+        $output = $this->runWorkerUntilItStops('default');
+
+        $this->assertStrandedJobReport($logger, $ran, 'LOADING Redis is loading the dataset in memory');
+        $this->assertSame(array($ran), SucceedingJob::$handled, 'the job ran once and the next one was not taken');
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting));
+        $this->assertOutputContains('may be stranded', $output);
+    }
+
+    public function testAHealthyRedisRequeuesAFailedJobWithoutStoppingTheWorker()
+    {
+        $this->bootWithRetryLimit(2);
+        $logger = $this->useRecordingLogger();
+        $broken = $this->enqueue('exception', 'default');
+
+        $output = $this->runWorker('default');
+
+        $this->assertSame(array(), $logger->errors);
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertOutputContains("Job {$broken} failed; requeued (attempt 1)", $output);
+        $this->assertTrue(strpos($output, 'stranded') === false, 'nothing reported as stranded');
+    }
+
+    public function testARefusedFailureRecordIsReportedWithThePayloadAndTheException()
+    {
+        $logger = $this->useRecordingLogger();
+        $this->db->insertFailure = new \RuntimeException('insert refused');
+        $broken = $this->enqueue('exception', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertCount(1, $logger->errors);
+        $context = $logger->errors[0]['context'];
+        $this->assertSame($broken, $context['uuid']);
+        $payload = json_decode($context['payload'], true);
+        $this->assertSame($broken, $payload['uuid']);
+        $this->assertSame('exception', $payload['type']);
+        $this->assertSame('RuntimeException', $context['exception']['class']);
+        $this->assertSame('job blew up', $context['exception']['message']);
+        $this->assertTrue(strpos($context['exception']['file'], 'ExceptionJob.php') !== false);
+        $this->assertSame('insert refused', $context['error']);
+    }
+
+    public function testANulByteInAnExceptionMessageDoesNotMakeTheFailureRecordRefused()
+    {
+        $broken = $this->enqueue('nul-message', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $exception = json_decode($this->failedJobRow($broken)['exception'], true);
+        $this->assertSame('upstream answered  and hung up', $exception['message']);
+    }
+
+    public function testAJobThatReturnsWithATransactionOpenIsRolledBackRetriedAndRecordedAsFailed()
+    {
+        $this->bootWithRetryLimit(2);
+        $leaking = $this->enqueue('transaction-leak-return', 'default');
+        $next = $this->enqueue('transactional', 'default');
+
+        $output = $this->runWorker('default');
+
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $leaking);
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $record['status']);
+        $this->assertSame(2, $record['attempts']);
+        $this->assertSame(array($leaking), $this->failedJobUuids());
+        $this->assertSame(0, $this->db->level);
+        $this->assertSame(array(0), TransactionalJob::$levelsAtStart, 'the next job starts at the original level');
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($next));
+        $this->assertOutputContains("Job {$leaking} failed; requeued (attempt 1)", $output);
+        $this->assertOutputContains('The job returned with a transaction left open.', $output);
     }
 
     /**

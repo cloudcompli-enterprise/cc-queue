@@ -12,6 +12,7 @@ namespace CCQueue\Tests\Fakes;
  * - a SAVEPOINT, or a rollback to one, outside a real transaction is refused;
  * - purge() disconnects first, which is refused while the transaction count is above zero; with the default
  *   connection's name it then gives a fresh connection;
+ * - a jsonb value holding \u0000 is refused;
  * - getConnections() lists the default connection only once something has used it.
  */
 class FakeDatabase
@@ -114,6 +115,9 @@ class FakeDatabase
             throw $this->insertFailure;
         }
         $this->pdo->assertAlive();
+        if (isset($row['exception']) && strpos($row['exception'], '\\u0000') !== false) {
+            throw new \RuntimeException('unsupported Unicode escape sequence: \\u0000 cannot be converted to text');
+        }
         if ($this->aborted) {
             throw new \RuntimeException('current transaction is aborted, commands ignored until end of transaction block');
         }
