@@ -138,6 +138,7 @@ class CCQueueWorkerCommand extends Command
 
                 $this->transactionLevelAtJobStart = $this->transactionLevel();
                 $this->processJob($payload);
+                $this->failIfTheJobLeftATransactionOpen();
 
                 // If processing succeeds, mark the job as "completed".
                 $this->info('Marking job as completed: ' . $jobUuid);
@@ -218,26 +219,58 @@ class CCQueueWorkerCommand extends Command
     protected function handleFailedJob($job, $payload, $exception, JobDispatcher $dispatcher, $retryLimit)
     {
         $connectionBeyondRepair = $this->rollBackWhatTheJobLeftOpen();
+        $redisFailed = false;
 
         if (isset($payload['uuid'])) {
             $jobUuid = $payload['uuid'];
-            $retryAttempt = $dispatcher->retryJob($payload, $retryLimit, $this->argument('version'));
-            $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
-            $attempts = $currentAttempts + 1;
+            try {
+                $retryAttempt = $dispatcher->retryJob($payload, $retryLimit, $this->argument('version'));
+            } catch (\Exception $e) {
+                $redisFailed = true;
+                $this->reportStrandedJob($jobUuid, $job, $e);
+            } catch (\Throwable $e) {
+                $redisFailed = true;
+                $this->reportStrandedJob($jobUuid, $job, $e);
+            }
 
-            if (!$retryAttempt) {
-                $this->logFailedJob($job, $exception);
-                $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
-            } else {
-                $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
+            if (!$redisFailed) {
+                $currentAttempts = isset($payload['attempts']) ? (int)$payload['attempts'] : 0;
+                $attempts = $currentAttempts + 1;
+
+                if (!$retryAttempt) {
+                    $this->logFailedJob($job, $exception);
+                    $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
+                } else {
+                    $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
+                }
             }
         }
 
         // Only once the job is requeued or recorded, so nothing sits in_progress while the worker waits.
-        if ($connectionBeyondRepair) {
+        if ($connectionBeyondRepair || $redisFailed) {
             $this->waitOutMinimumUptime();
             $this->requestStop();
+        }
+        if ($connectionBeyondRepair) {
             $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
+        }
+    }
+
+    protected function reportStrandedJob($uuid, $job, $error)
+    {
+        $this->reportSafely("Job {$uuid} may be stranded: Redis failed while its failure was being recorded; the worker stops after this job so a fresh connection starts. Error: " . $error->getMessage(), [
+            'uuid' => $uuid,
+            'payload' => $job,
+            'error' => $error->getMessage(),
+        ]);
+    }
+
+    protected function failIfTheJobLeftATransactionOpen()
+    {
+        $startLevel = $this->transactionLevelAtJobStart;
+        $level = $this->transactionLevel();
+        if ($startLevel !== null && $level !== null && $level > $startLevel) {
+            throw new \RuntimeException('The job returned with a transaction left open.');
         }
     }
 
@@ -260,9 +293,9 @@ class CCQueueWorkerCommand extends Command
                 'failed_at' => Carbon::now(),
             ]);
         } catch (\Exception $e) {
-            $this->reportUnrecordedFailure($uuid, $e);
+            $this->reportUnrecordedFailure($uuid, $job, $exception, $e);
         } catch (\Throwable $e) {
-            $this->reportUnrecordedFailure($uuid, $e);
+            $this->reportUnrecordedFailure($uuid, $job, $exception, $e);
         }
     }
 
@@ -271,20 +304,27 @@ class CCQueueWorkerCommand extends Command
      */
     protected function describeException($exception)
     {
+        // Postgres jsonb rejects \u0000, so a NUL byte in a message would make the insert fail.
         $description = json_encode([
             'class' => get_class($exception),
-            'message' => $exception->getMessage(),
-            'file' => $exception->getFile() . ':' . $exception->getLine(),
-            'trace' => $exception->getTraceAsString(),
+            'message' => str_replace("\0", '', $exception->getMessage()),
+            'file' => str_replace("\0", '', $exception->getFile()) . ':' . $exception->getLine(),
+            'trace' => str_replace("\0", '', $exception->getTraceAsString()),
         ], JSON_PARTIAL_OUTPUT_ON_ERROR);
 
         return $description !== false ? $description : json_encode(['class' => get_class($exception)]);
     }
 
-    protected function reportUnrecordedFailure($uuid, $error)
+    protected function reportUnrecordedFailure($uuid, $job, $exception, $error)
     {
         $this->reportSafely("Could not record failed job {$uuid}: " . $error->getMessage(), [
             'uuid' => $uuid,
+            'payload' => $job,
+            'exception' => [
+                'class' => get_class($exception),
+                'message' => $exception->getMessage(),
+                'file' => $exception->getFile() . ':' . $exception->getLine(),
+            ],
             'error' => $error->getMessage(),
         ]);
     }
@@ -296,9 +336,9 @@ class CCQueueWorkerCommand extends Command
             $this->error($message);
             Log::error('CCQueueWorkerCommand: ' . $message, $context);
         } catch (\Exception $e) {
-            error_log('CCQueueWorkerCommand: ' . $message);
+            error_log('CCQueueWorkerCommand: ' . $message . ' ' . json_encode($context, JSON_PARTIAL_OUTPUT_ON_ERROR));
         } catch (\Throwable $e) {
-            error_log('CCQueueWorkerCommand: ' . $message);
+            error_log('CCQueueWorkerCommand: ' . $message . ' ' . json_encode($context, JSON_PARTIAL_OUTPUT_ON_ERROR));
         }
     }
 
