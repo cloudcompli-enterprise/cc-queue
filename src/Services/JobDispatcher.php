@@ -21,9 +21,9 @@ class JobDispatcher
      *
      * @param array $payload
      * @param string|null $version
-     * @param int|null $expire Seconds until the job's hash expires; null takes `cc-queue.expire_jobs`, and with
-     *        neither the hash gets no TTL. A worker drops a job whose hash is gone, so a TTL here must outlast
-     *        the longest the job can wait in the queue.
+     * @param int|null $expire Seconds until the job's hash expires; 0 or less sets no TTL. Null takes
+     *        `cc-queue.expire_jobs`, and with neither the hash gets no TTL. A worker drops a job whose hash
+     *        is gone, so a TTL here must outlast the longest the job can wait in the queue.
      * @return void
      */
     public function enqueueJob(array $payload, $version = null, $expire = null)
@@ -121,9 +121,10 @@ class JobDispatcher
      * @param string $uuid
      * @param string $status
      * @param int|null $attempts
-     * @param int|null $expire Seconds until the job's hash expires. Null gives a finished job (completed or
-     *        failed) `cc-queue.expire_status`, 24 hours by default, and leaves a pending or in-progress job's
-     *        TTL alone, since a worker drops a job whose hash has expired while it waits in the queue.
+     * @param int|null $expire Seconds until the job's hash expires; 0 or less sets no TTL. Null gives a
+     *        finished job (completed or failed) `cc-queue.expire_status`, 24 hours by default, removes the TTL
+     *        of an in-progress job, and leaves a pending job's TTL alone, since a worker drops a job whose
+     *        hash has expired while it waits in the queue.
      */
     public function updateJobStatus($uuid, $status, $attempts = null, $expire = null)
     {
@@ -144,6 +145,11 @@ class JobDispatcher
         }
 
         Redis::hmset($key, $fields);
+
+        // A TTL set at enqueue must not delete the hash while the job runs.
+        if (is_null($expire) && $status === self::STATUS_IN_PROGRESS) {
+            Redis::persist($key);
+        }
 
         // Help prevent memory leaks by expiring the job after a certain amount of time.
         if ($expireLength > 0) {

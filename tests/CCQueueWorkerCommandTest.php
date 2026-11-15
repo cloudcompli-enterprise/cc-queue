@@ -18,6 +18,7 @@ use CCQueue\Tests\Jobs\DatabaseProbeJob;
 use CCQueue\Tests\Jobs\StopSignalJob;
 use CCQueue\Tests\Jobs\SucceedingJob;
 use CCQueue\Tests\Jobs\TransactionalJob;
+use CCQueue\Tests\Jobs\TtlProbeJob;
 use Illuminate\Container\Container;
 use Illuminate\Support\Facades\Facade;
 use PHPUnit\Framework\TestCase;
@@ -66,6 +67,7 @@ class CCQueueWorkerCommandTest extends TestCase
                     'dead-connection' => array('default' => 'CCQueue\Tests\Jobs\DeadConnectionJob'),
                     'pdo-commit' => array('default' => 'CCQueue\Tests\Jobs\PdoCommitJob'),
                     'transactional' => array('default' => 'CCQueue\Tests\Jobs\TransactionalJob'),
+                    'ttl-probe' => array('default' => 'CCQueue\Tests\Jobs\TtlProbeJob'),
                     'nul-message' => array('default' => 'CCQueue\Tests\Jobs\NulMessageJob'),
                     'transaction-leak-return' => array('default' => 'CCQueue\Tests\Jobs\TransactionLeakReturnJob'),
                 ),
@@ -81,6 +83,7 @@ class CCQueueWorkerCommandTest extends TestCase
         StopSignalJob::$handled = array();
         DatabaseProbeJob::$handled = array();
         TransactionalJob::$levelsAtStart = array();
+        TtlProbeJob::$ttlsDuringJob = array();
     }
 
     private function enqueue($type, $version, array $data = array())
@@ -149,6 +152,20 @@ class CCQueueWorkerCommandTest extends TestCase
         if (!function_exists('pcntl_signal') || !function_exists('posix_kill')) {
             $this->markTestSkipped('needs the pcntl and posix extensions');
         }
+    }
+
+    private function ttl($uuid)
+    {
+        $key = 'cc-queue:jobs:' . $uuid;
+
+        return isset($this->redis->ttls[$key]) ? $this->redis->ttls[$key] : null;
+    }
+
+    private function enqueueWithExpiry($type, $expire, array $data = array())
+    {
+        $dispatcher = new JobDispatcher();
+
+        return $dispatcher->enqueueJob(array('type' => $type, 'data' => $data), 'default', $expire);
     }
 
     private function pushedTo($queue)
@@ -247,6 +264,62 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains('job blew up', $output);
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+    }
+
+    public function failFlagProvider()
+    {
+        return array(
+            'a job that completes' => array(array()),
+            'a job that fails permanently' => array(array('fail' => true)),
+        );
+    }
+
+    /**
+     * @dataProvider failFlagProvider
+     */
+    public function testAnEnqueueTtlIsGoneWhileTheJobRunsAndTheFinishedTtlIsSetWhenItEnds(array $data)
+    {
+        $uuid = $this->enqueueWithExpiry('ttl-probe', 600, $data);
+        $this->assertSame(600, $this->ttl($uuid), 'the TTL set at enqueue');
+
+        $this->runWorker('default');
+
+        $this->assertNull(TtlProbeJob::$ttlsDuringJob[$uuid], 'no TTL once the worker claimed the job');
+        $this->assertSame(86400, $this->ttl($uuid));
+        $expected = $data ? JobDispatcher::STATUS_FAILED : JobDispatcher::STATUS_COMPLETED;
+        $this->assertSame($expected, $this->status($uuid));
+    }
+
+    public function testACompletedJobsHashExpiresAfterADayWhenNothingIsConfigured()
+    {
+        $uuid = $this->enqueue('succeeds', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($uuid));
+        $this->assertSame(86400, $this->ttl($uuid));
+    }
+
+    public function testACompletedJobsHashTakesTheConfiguredStatusExpiry()
+    {
+        $this->container->make('config')->set('cc-queue.expire_status', 3600);
+        $uuid = $this->enqueue('succeeds', 'default');
+
+        $this->runWorker('default');
+
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($uuid));
+        $this->assertSame(3600, $this->ttl($uuid));
+    }
+
+    public function testAStatusExpiryOfZeroLeavesAFinishedJobsHashWithoutATtl()
+    {
+        $this->container->make('config')->set('cc-queue.expire_status', 0);
+        $uuid = $this->enqueueWithExpiry('succeeds', 600);
+
+        $this->runWorker('default');
+
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($uuid));
+        $this->assertNull($this->ttl($uuid));
     }
 
     public function testALegacyWorkerRetriesAJobOnTheLegacyQueue()

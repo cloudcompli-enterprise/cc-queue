@@ -147,8 +147,6 @@ class CCQueueWorkerCommand extends Command
                     JobDispatcher::STATUS_COMPLETED,
                     $jobRecord['attempts'] ? (int)$jobRecord['attempts'] : 0
                 );
-
-                $redis->expire($jobStatusKey, 86400); // expire after 24 hours
             } catch (\Exception $e) {
                 $this->handleFailedJob($job, $payload, $e, $dispatcher, $retryLimit);
             } catch (\Throwable $e) {
