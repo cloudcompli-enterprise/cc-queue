@@ -151,6 +151,11 @@ class CCQueueWorkerCommandTest extends TestCase
         }
     }
 
+    private function pushedTo($queue)
+    {
+        return isset($this->redis->pushes[$queue]) ? $this->redis->pushes[$queue] : 0;
+    }
+
     private function status($uuid)
     {
         $record = $this->redis->hgetall('cc-queue:jobs:' . $uuid);
@@ -256,7 +261,25 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(3, $record['attempts']);
         $this->assertSame(array($broken), $this->failedJobUuids());
         $this->assertOutputContains("Job {$broken} failed; requeued (attempt 2)", $output);
-        $this->assertTrue(empty($this->redis->lists['cc-queue:default:tasks']), 'nothing reaches the default queue');
+        $this->assertSame(3, $this->pushedTo('cc-queue:legacy:tasks'), 'the job and its two retries');
+        $this->assertSame(0, $this->pushedTo('cc-queue:default:tasks'));
+    }
+
+    public function testARetryStaysOnTheWorkersFamilyWhenThePayloadNamesAnother()
+    {
+        $this->bootWithRetryLimit(3);
+        $dispatcher = new JobDispatcher();
+        $broken = $dispatcher->enqueueJob(array('type' => 'exception', 'data' => array(), 'version' => 'default'), 'legacy');
+
+        $output = $this->runWorker('legacy');
+
+        $record = $this->redis->hgetall('cc-queue:jobs:' . $broken);
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $record['status']);
+        $this->assertSame(3, $record['attempts']);
+        $this->assertSame(array($broken), $this->failedJobUuids());
+        $this->assertOutputContains("Job {$broken} failed permanently after 3 attempts", $output);
+        $this->assertSame(3, $this->pushedTo('cc-queue:legacy:tasks'), 'the job and its two retries');
+        $this->assertSame(0, $this->pushedTo('cc-queue:default:tasks'));
     }
 
     public function testAPermanentFailureIsRecordedWithTheConfiguredConnection()

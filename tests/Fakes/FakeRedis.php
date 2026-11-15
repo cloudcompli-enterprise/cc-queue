@@ -6,6 +6,10 @@ class FakeRedis
 {
     public $lists = array();
     public $hashes = array();
+
+    /** @var array how many times each list key has been pushed to, whether or not it has been drained since */
+    public $pushes = array();
+
     public $onEmptyPoll;
     private $emptyPolls = 0;
     private $failures = array();
@@ -46,6 +50,7 @@ class FakeRedis
     public function lpush($key, $value)
     {
         $this->track('lpush');
+        $this->pushes[$key] = (isset($this->pushes[$key]) ? $this->pushes[$key] : 0) + 1;
         if (!isset($this->lists[$key])) {
             $this->lists[$key] = array();
         }

@@ -152,8 +152,9 @@ class JobDispatcher
      *
      * @param array $payload
      * @param int|null $retryLimit
-     * @param string|null $version The queue family the job was claimed from. Without it, the payload's
-     *        `version`, which producers rarely set, so the job would fall back to the default family.
+     * @param string|null $version The queue family the job was claimed from; without it, the retry follows
+     *        the payload's `version`, then the default family. The priority comes from the payload's
+     *        `priority` (normal when absent).
      * @return bool
      */
     public function retryJob(array $payload, $retryLimit = null, $version = null)
