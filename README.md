@@ -70,7 +70,10 @@ Set the event handlers in the config file so that the CC Queue knows what to do 
     CC_QUEUE_REDIS_QUEUE=cc-queue # This is optional; (Recommended if you want a unique redis queue name); Default is cc-queue
     CC_FAILED_JOBS_TABLE=cc_queue_failed_jobs # This is optional;
     CC_QUEUE_RETRY_LIMIT=3 # This is optional; Default is 3; The number or retry attempts before the job is marked as failed.
+    CC_QUEUE_MIN_UPTIME_BEFORE_STOP=10 # This is optional; Default is 10; Seconds a worker stays up before it stops itself.
 ```
+
+`min_uptime_before_stop` applies when the worker stops itself after a failure it cannot repair, such as a database connection left in a broken state or a Redis failure while it was recording a job's failure. The worker first stays up this many seconds, so a process supervisor counts the exit as a normal one rather than a crash loop, and then exits so that a fresh worker starts.
 
 
 ---
