@@ -218,6 +218,7 @@ class CCQueueWorkerCommand extends Command
     {
         $connectionBeyondRepair = $this->rollBackWhatTheJobLeftOpen();
         $redisFailed = false;
+        $databaseUnreachable = false;
 
         if (isset($payload['uuid'])) {
             $jobUuid = $payload['uuid'];
@@ -236,7 +237,7 @@ class CCQueueWorkerCommand extends Command
                 $attempts = $currentAttempts + 1;
 
                 if (!$retryAttempt) {
-                    $this->logFailedJob($job, $exception);
+                    $databaseUnreachable = $this->logFailedJob($job, $exception);
                     $this->error("Job {$jobUuid} failed permanently after {$attempts} attempts. Error: " . $exception->getMessage());
                 } else {
                     $this->error("Job {$jobUuid} failed; requeued (attempt {$attempts}). Error: " . $exception->getMessage());
@@ -245,12 +246,15 @@ class CCQueueWorkerCommand extends Command
         }
 
         // Only once the job is requeued or recorded, so nothing sits in_progress while the worker waits.
-        if ($connectionBeyondRepair || $redisFailed) {
+        if ($connectionBeyondRepair || $redisFailed || $databaseUnreachable) {
             $this->waitOutMinimumUptime();
             $this->requestStop();
         }
         if ($connectionBeyondRepair) {
             $this->reportSafely('A failed job left the database connection in a state the worker cannot repair; the worker stops after this job so a fresh one starts.');
+        }
+        if ($databaseUnreachable) {
+            $this->reportSafely('The database could not be reached while a failed job was being recorded; the worker stops after this job rather than fail the jobs queued behind it unrecorded.');
         }
     }
 
@@ -275,6 +279,8 @@ class CCQueueWorkerCommand extends Command
     /**
      * Runs inside the worker's failure handling, so it must not throw: an exception here would end
      * the worker with queued work waiting until supervisor restarts it.
+     *
+     * @return bool true when the record couldn't be written because the database can't be reached
      */
     protected function logFailedJob($job, $exception)
     {
@@ -292,9 +298,58 @@ class CCQueueWorkerCommand extends Command
             ]);
         } catch (\Exception $e) {
             $this->reportUnrecordedFailure($uuid, $job, $exception, $e);
+
+            return $this->isConnectionFailure($e);
         } catch (\Throwable $e) {
             $this->reportUnrecordedFailure($uuid, $job, $exception, $e);
+
+            return $this->isConnectionFailure($e);
         }
+
+        return false;
+    }
+
+    /**
+     * Laravel 5.2 throws a bare PDOException when it can't connect or reconnect, and Laravel 10 a QueryException
+     * for a failed first connect; PDO leaves the driver code (7) in getCode(), so the SQLSTATE comes from errorInfo.
+     * Only a QueryException that carries a connection SQLSTATE or a lost-connection message counts: a constraint
+     * or data error on the row is not one.
+     */
+    protected function isConnectionFailure($error)
+    {
+        if (!$error instanceof \PDOException) {
+            return false;
+        }
+        if (!method_exists($error, 'getSql')) {
+            return true;
+        }
+
+        $sqlState = isset($error->errorInfo[0]) ? (string) $error->errorInfo[0] : '';
+        if ($sqlState === '' && preg_match('/SQLSTATE\[(\w+)\]/', $error->getMessage(), $matches)) {
+            $sqlState = $matches[1];
+        }
+        if (substr($sqlState, 0, 2) === '08' || in_array($sqlState, array('57P01', '57P02', '57P03'), true)) {
+            return true;
+        }
+
+        foreach (array(
+            'server has gone away',
+            'no connection to the server',
+            'Lost connection',
+            'Error while sending',
+            'Error writing data to the connection',
+            'server closed the connection unexpectedly',
+            'SSL connection has been closed unexpectedly',
+            'decryption failed or bad record mac',
+            'SSL SYSCALL error: EOF detected',
+            'reset by peer',
+        ) as $phrase) {
+            if (strpos($error->getMessage(), $phrase) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
