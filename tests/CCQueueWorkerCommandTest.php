@@ -8,6 +8,7 @@ use CCQueue\Tests\Fakes\FakeConfig;
 use CCQueue\Tests\Fakes\ClockedWorkerCommand;
 use CCQueue\Tests\Fakes\ErrorThrowingLogger;
 use CCQueue\Tests\Fakes\FakeDatabase;
+use CCQueue\Tests\Fakes\FakeQueryException;
 use CCQueue\Tests\Fakes\FakeRedis;
 use CCQueue\Tests\Fakes\NullLogger;
 use CCQueue\Tests\Fakes\RecordingLogger;
@@ -90,9 +91,9 @@ class CCQueueWorkerCommandTest extends TestCase
         return $dispatcher->enqueueJob(array('type' => $type, 'data' => $data), $version);
     }
 
-    private function runWorker($version)
+    private function runWorker($version, CCQueueWorkerCommand $command = null)
     {
-        $command = new CCQueueWorkerCommand();
+        $command = $command ?: new CCQueueWorkerCommand();
         $command->setLaravel($this->container);
         $output = new BufferedOutput();
 
@@ -313,6 +314,101 @@ class CCQueueWorkerCommandTest extends TestCase
         $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
         $this->assertOutputContains("Could not record failed job {$broken}", $output);
         $this->assertOutputContains("Job {$broken} failed permanently after 1 attempts", $output);
+        $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
+        $this->assertSame(array($healthy), SucceedingJob::$handled);
+    }
+
+    public function connectionFailureProvider()
+    {
+        $refused = 'connection to server at "db", port 5432 failed: Connection refused';
+
+        return array(
+            'Laravel 5.2: the connector throws a bare PDOException' => array(
+                new \PDOException('SQLSTATE[08006] [7] could not connect to server: Connection refused', 7),
+            ),
+            'a bare PDOException without a SQLSTATE in the message' => array(
+                new \PDOException('could not translate host name "db" to address', 7),
+            ),
+            'Laravel 10: the first connect fails inside the query (08006)' => array(
+                new FakeQueryException('SQLSTATE[08006] [7] ' . $refused, '08006'),
+            ),
+            'a connection exception of another 08 kind' => array(
+                new FakeQueryException('SQLSTATE[08003]: connection does not exist', '08003'),
+            ),
+            'the server shuts down (57P01)' => array(
+                new FakeQueryException('SQLSTATE[57P01]: terminating connection due to administrator command', '57P01'),
+            ),
+            'the server crashes (57P02)' => array(
+                new FakeQueryException('SQLSTATE[57P02]: terminating connection because of crash of another server process', '57P02'),
+            ),
+            'the server is starting up (57P03)' => array(
+                new FakeQueryException('SQLSTATE[57P03]: the database system is starting up', '57P03'),
+            ),
+            'an established connection drops (HY000 with a lost-connection message)' => array(
+                new FakeQueryException('SQLSTATE[HY000]: General error: 7 server closed the connection unexpectedly', 'HY000'),
+            ),
+        );
+    }
+
+    /**
+     * @dataProvider connectionFailureProvider
+     */
+    public function testAnUnreachableDatabaseWhileRecordingAFailureStopsTheWorkerOnceItHasBeenUpTheMinimumTime($insertFailure)
+    {
+        $logger = $this->useRecordingLogger();
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $this->db->insertFailure = $insertFailure;
+        $broken = $this->enqueue('exception', 'default');
+        $waiting = $this->enqueue('succeeds', 'default');
+        $worker = new ClockedWorkerCommand();
+        $reportsWhenTheWaitBegan = null;
+        $worker->onPause = function () use ($logger, &$reportsWhenTheWaitBegan) {
+            if ($reportsWhenTheWaitBegan === null) {
+                $reportsWhenTheWaitBegan = count($logger->errors);
+            }
+        };
+
+        $output = $this->runWorkerUntilItStops('default', $worker);
+
+        $this->assertSame(JobDispatcher::STATUS_FAILED, $this->status($broken));
+        $this->assertSame(JobDispatcher::STATUS_PENDING, $this->status($waiting), 'the next job was not claimed');
+        $this->assertSame(array(), SucceedingJob::$handled);
+        $this->assertEquals(10.0, array_sum($worker->pauses), 'waited out the minimum uptime', 0.0001);
+        $this->assertSame(1, $reportsWhenTheWaitBegan, 'the unrecorded job was reported before the wait');
+        $this->assertSame($broken, $logger->errors[0]['context']['uuid']);
+        $payload = json_decode($logger->errors[0]['context']['payload'], true);
+        $this->assertSame($broken, $payload['uuid']);
+        $this->assertOutputContains("Could not record failed job {$broken}", $output);
+        $this->assertOutputContains('the worker stops after this job', $output);
+    }
+
+    public function dataErrorProvider()
+    {
+        return array(
+            'not-null violation' => array(new FakeQueryException('SQLSTATE[23502]: Not null violation: 7 null value in column "payload"', '23502', 7)),
+            'unique violation' => array(new FakeQueryException('SQLSTATE[23505]: Unique violation: 7 duplicate key value violates unique constraint', '23505', 7)),
+            'a query error whose message only mentions a connection' => array(new FakeQueryException('SQLSTATE[22P05]: untranslatable character in the connection encoding', '22P05', 7)),
+        );
+    }
+
+    /**
+     * @dataProvider dataErrorProvider
+     */
+    public function testARefusedRowIsReportedAndTheWorkerTakesTheNextJob($insertFailure)
+    {
+        $logger = $this->useRecordingLogger();
+        $this->container->make('config')->set('cc-queue.min_uptime_before_stop', 10);
+        $this->db->insertFailure = $insertFailure;
+        $broken = $this->enqueue('exception', 'default');
+        $healthy = $this->enqueue('succeeds', 'default');
+        $worker = new ClockedWorkerCommand();
+
+        $output = $this->runWorker('default', $worker);
+
+        $this->assertSame(array(), $worker->pauses, 'no wait');
+        $this->assertCount(1, $logger->errors);
+        $this->assertSame($broken, $logger->errors[0]['context']['uuid']);
+        $this->assertOutputContains("Could not record failed job {$broken}", $output);
         $this->assertSame(JobDispatcher::STATUS_COMPLETED, $this->status($healthy));
         $this->assertSame(array($healthy), SucceedingJob::$handled);
     }
