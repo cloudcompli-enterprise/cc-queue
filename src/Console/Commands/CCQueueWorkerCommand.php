@@ -225,7 +225,7 @@ class CCQueueWorkerCommand extends Command
         if (isset($payload['uuid'])) {
             $jobUuid = $payload['uuid'];
             try {
-                $retryAttempt = $dispatcher->retryJob($payload, $retryLimit);
+                $retryAttempt = $dispatcher->retryJob($payload, $retryLimit, $this->argument('version'));
             } catch (\Exception $e) {
                 $redisFailed = true;
                 $this->reportStrandedJob($jobUuid, $job, $e);
