@@ -72,4 +72,6 @@ return [
     ],
 
     'retry_limit' => env('CC_QUEUE_RETRY_LIMIT', 3), // Add retry limit
+
+    'min_uptime_before_stop' => env('CC_QUEUE_MIN_UPTIME_BEFORE_STOP', 10),
 ];
