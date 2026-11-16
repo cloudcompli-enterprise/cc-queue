@@ -7,6 +7,9 @@ class FakeRedis
     public $lists = array();
     public $hashes = array();
 
+    /** @var array seconds to live of each key that has a TTL */
+    public $ttls = array();
+
     /** @var array how many times each list key has been pushed to, whether or not it has been drained since */
     public $pushes = array();
 
@@ -98,9 +101,36 @@ class FakeRedis
         return isset($this->hashes[$key]) ? $this->hashes[$key] : array();
     }
 
+    /** As in Redis: a key that doesn't exist takes no TTL, and a TTL of zero or less deletes the key. */
     public function expire($key, $seconds)
     {
         $this->track('expire');
+        if (!$this->exists($key)) {
+            return false;
+        }
+        if ($seconds <= 0) {
+            unset($this->hashes[$key], $this->lists[$key], $this->ttls[$key]);
+
+            return true;
+        }
+        $this->ttls[$key] = $seconds;
+
         return true;
+    }
+
+    public function persist($key)
+    {
+        $this->track('persist');
+        if (!$this->exists($key) || !isset($this->ttls[$key])) {
+            return false;
+        }
+        unset($this->ttls[$key]);
+
+        return true;
+    }
+
+    private function exists($key)
+    {
+        return isset($this->hashes[$key]) || !empty($this->lists[$key]);
     }
 }
