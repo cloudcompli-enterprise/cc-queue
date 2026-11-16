@@ -312,8 +312,8 @@ class CCQueueWorkerCommand extends Command
     /**
      * Laravel 5.2 throws a bare PDOException when it can't connect or reconnect, and Laravel 10 a QueryException
      * for a failed first connect; PDO leaves the driver code (7) in getCode(), so the SQLSTATE comes from errorInfo.
-     * Only a QueryException that carries a connection SQLSTATE or a lost-connection message counts: a constraint
-     * or data error on the row is not one.
+     * Only a QueryException that carries a connection SQLSTATE or a lost-connection message from the driver
+     * counts; its own message appends the row's bindings, which can quote any text, so it isn't searched.
      */
     protected function isConnectionFailure($error)
     {
@@ -332,6 +332,7 @@ class CCQueueWorkerCommand extends Command
             return true;
         }
 
+        $driverMessage = $error->getPrevious() ? $error->getPrevious()->getMessage() : $error->getMessage();
         foreach (array(
             'server has gone away',
             'no connection to the server',
@@ -344,7 +345,7 @@ class CCQueueWorkerCommand extends Command
             'SSL SYSCALL error: EOF detected',
             'reset by peer',
         ) as $phrase) {
-            if (strpos($error->getMessage(), $phrase) !== false) {
+            if (strpos($driverMessage, $phrase) !== false) {
                 return true;
             }
         }

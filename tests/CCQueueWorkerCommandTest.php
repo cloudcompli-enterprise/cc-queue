@@ -470,9 +470,9 @@ class CCQueueWorkerCommandTest extends TestCase
     public function dataErrorProvider()
     {
         return array(
-            'not-null violation' => array(new FakeQueryException('SQLSTATE[23502]: Not null violation: 7 null value in column "payload"', '23502', 7)),
-            'unique violation' => array(new FakeQueryException('SQLSTATE[23505]: Unique violation: 7 duplicate key value violates unique constraint', '23505', 7)),
-            'a query error whose message only mentions a connection' => array(new FakeQueryException('SQLSTATE[22P05]: untranslatable character in the connection encoding', '22P05', 7)),
+            'not-null violation' => array(new FakeQueryException('SQLSTATE[23502]: Not null violation: 7 null value in column "payload"', '23502')),
+            'unique violation' => array(new FakeQueryException('SQLSTATE[23505]: Unique violation: 7 duplicate key value violates unique constraint', '23505')),
+            'a row whose own text mentions a lost connection' => array(new FakeQueryException('SQLSTATE[22001]: String data, right truncated: 7 value too long', '22001', '{"message":"server has gone away"}')),
         );
     }
 
